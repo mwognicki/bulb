@@ -6,7 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -49,6 +51,8 @@ func TestParsePair(t *testing.T) {
 // a goroutine, dials through the proxy, and verifies bytes flow both
 // ways and that graceful shutdown drains in-flight connections.
 func TestServe_EndToEnd(t *testing.T) {
+	requireTCPListenSupport(t)
+
 	upstream := startEchoServer(t)
 
 	listenAddr := freeAddr(t)
@@ -87,6 +91,8 @@ func TestServe_EndToEnd(t *testing.T) {
 // TestServe_DrainTimeoutExceeded verifies that Serve returns even when
 // a stuck client refuses to drain — proving the drain timeout works.
 func TestServe_DrainTimeoutExceeded(t *testing.T) {
+	requireTCPListenSupport(t)
+
 	stuck := startStuckUpstream(t)
 	listenAddr := freeAddr(t)
 	specs := []Spec{{Listen: listenAddr, Upstream: stuck}}
@@ -113,6 +119,8 @@ func TestServe_DrainTimeoutExceeded(t *testing.T) {
 }
 
 func TestServe_BindFailure(t *testing.T) {
+	requireTCPListenSupport(t)
+
 	// Take a port, then ask Serve to bind it.
 	occupier, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -216,4 +224,18 @@ func readAll(t *testing.T, r io.Reader, n int) string {
 		t.Fatalf("read: %v", err)
 	}
 	return string(buf[:got])
+}
+
+func requireTCPListenSupport(t *testing.T) {
+	t.Helper()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err == nil {
+		_ = l.Close()
+		return
+	}
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, os.ErrPermission) {
+		t.Skipf("skipping test: TCP listen is not permitted in this environment: %v", err)
+	}
+	t.Fatalf("probe listen failed: %v", err)
 }

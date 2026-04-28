@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bulb-firewall-agent
+  namespace: bulb-system
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: firewall-agent
+data:
+  backend: nftables
+  zone: public
+  stateFile: /var/lib/bulb/firewall-agent-state.json
+  deniedPorts: 22,80,443
+  dryRun: "false"

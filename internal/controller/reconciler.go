@@ -5,16 +5,19 @@ import (
 	"fmt"
 	"sort"
 
+	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
@@ -27,14 +30,10 @@ const LoadBalancerClass = "bulb"
 type ServiceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	record.EventRecorder
 
-	// Namespace is where DaemonSets are created (default bulb-system).
-	Namespace string
-	// Image is the bulb container image deployed in the proxy DaemonSet.
-	Image string
-	// NodeIPsConfigMap is the name (in Namespace) of a ConfigMap whose
-	// data maps node-name → public IPv4. Phase 1 only — Phase 4 will
-	// switch to node annotations written by node-ip-labeler.
+	Namespace        string
+	Image            string
 	NodeIPsConfigMap string
 }
 
@@ -72,6 +71,17 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.applyDaemonSet(ctx, desired); err != nil {
 		return ctrl.Result{}, err
 	}
+	lbports, err := r.BuildLBPorts(ctx, &svc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("build lbports: %w", err)
+	}
+	if err := r.applyLBPorts(ctx, lbports, &svc); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.pruneStaleAppliedNodes(ctx, &svc); err != nil {
+		logger.Error(err, "prune stale applied nodes")
+	}
+	r.emitLBPortEvents(ctx, &svc)
 
 	ips, err := r.publicIPs(ctx)
 	if err != nil {
@@ -136,6 +146,9 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 	var ds appsv1.DaemonSet
 	err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: dsName}, &ds)
 	if apierrors.IsNotFound(err) {
+		if err := r.cleanupLBPorts(ctx, svcNamespace, svcName); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 	if err != nil {
@@ -147,6 +160,9 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 	}
 	if err := r.Delete(ctx, &ds); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("delete daemonset: %w", err)
+	}
+	if err := r.cleanupLBPorts(ctx, svcNamespace, svcName); err != nil {
+		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
@@ -206,6 +222,10 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Service{}, builder.WithPredicates(servicePredicate())).
+		Watches(
+			&bulbv1alpha1.LBPort{},
+			handler.EnqueueRequestsFromMapFunc(lbPortToService),
+		).
 		Complete(r)
 }
 
@@ -228,4 +248,3 @@ func servicePredicate() predicate.Predicate {
 		GenericFunc: func(e event.GenericEvent) bool { return match(e.Object) },
 	}
 }
-

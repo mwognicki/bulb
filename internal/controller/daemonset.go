@@ -69,11 +69,7 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.Daemo
 		return nil, fmt.Errorf("parse %s: %w", AnnotationNodes, err)
 	}
 
-	labels := map[string]string{
-		labelManagedBy: labelManagedByV,
-		labelService:   svc.Name,
-		labelServiceNs: svc.Namespace,
-	}
+	labels := serviceLabels(svc)
 
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{

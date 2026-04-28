@@ -7,6 +7,7 @@ require (
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
 	sigs.k8s.io/controller-runtime v0.23.3
+	github.com/godbus/dbus/v5 v5.2.2
 )
 
 require (

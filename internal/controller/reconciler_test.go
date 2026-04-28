@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -22,6 +25,9 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatalf("add scheme: %v", err)
+	}
+	if err := bulbv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add bulb scheme: %v", err)
 	}
 	return s
 }
@@ -50,7 +56,7 @@ func newReconciler(t *testing.T, objs ...client.Object) (*ServiceReconciler, cli
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objs...).
-		WithStatusSubresource(&corev1.Service{}).
+		WithStatusSubresource(&corev1.Service{}, &bulbv1alpha1.LBPort{}).
 		Build()
 	return &ServiceReconciler{
 		Client:           c,
@@ -59,6 +65,25 @@ func newReconciler(t *testing.T, objs ...client.Object) (*ServiceReconciler, cli
 		Image:            "ghcr.io/mwognicki/bulb:test",
 		NodeIPsConfigMap: "node-ips",
 	}, c
+}
+
+func newReconcilerWithRecorder(t *testing.T, objs ...client.Object) (*ServiceReconciler, *record.FakeRecorder, client.Client) {
+	t.Helper()
+	scheme := newScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		WithStatusSubresource(&corev1.Service{}, &bulbv1alpha1.LBPort{}).
+		Build()
+	rec := record.NewFakeRecorder(16)
+	return &ServiceReconciler{
+		Client:           c,
+		Scheme:           scheme,
+		EventRecorder:    rec,
+		Namespace:        "bulb-system",
+		Image:            "ghcr.io/mwognicki/bulb:test",
+		NodeIPsConfigMap: "node-ips",
+	}, rec, c
 }
 
 func reconcileOnce(t *testing.T, r *ServiceReconciler, ns, name string) {
@@ -88,6 +113,61 @@ func TestReconcile_CreatesDaemonSetForBulbClass(t *testing.T) {
 	}
 }
 
+func TestReconcile_CreatesLBPortsForService(t *testing.T) {
+	svc := newSvc(nil)
+	r, c := newReconciler(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var lbport bulbv1alpha1.LBPort
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport); err != nil {
+		t.Fatalf("expected LBPort to exist: %v", err)
+	}
+	if lbport.Spec.Port != 8443 || lbport.Spec.Protocol != corev1.ProtocolTCP {
+		t.Fatalf("unexpected lbport spec: %+v", lbport.Spec)
+	}
+	if !sameStringSet(lbport.Spec.Nodes, []string{"*"}) {
+		t.Fatalf("expected wildcard nodes, got %+v", lbport.Spec.Nodes)
+	}
+}
+
+func TestReconcile_CreatesNodeScopedLBPortsWhenSelectorPresent(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationNodes: "role=edge"}
+	nodes := []client.Object{
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node-a",
+				Labels: map[string]string{"role": "edge"},
+			},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node-b",
+				Labels: map[string]string{"role": "edge"},
+			},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node-c",
+				Labels: map[string]string{"role": "db"},
+			},
+		},
+	}
+	objects := append([]client.Object{svc}, nodes...)
+	r, c := newReconciler(t, objects...)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var lbport bulbv1alpha1.LBPort
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport); err != nil {
+		t.Fatalf("expected LBPort to exist: %v", err)
+	}
+	if !sameStringSet(lbport.Spec.Nodes, []string{"node-a", "node-b"}) {
+		t.Fatalf("expected selected nodes, got %+v", lbport.Spec.Nodes)
+	}
+}
+
 func TestReconcile_CleansUpOnServiceDelete(t *testing.T) {
 	svc := newSvc(nil)
 	r, c := newReconciler(t, svc)
@@ -102,6 +182,12 @@ func TestReconcile_CleansUpOnServiceDelete(t *testing.T) {
 	err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected DS to be cleaned up after Service deletion, got err=%v", err)
+	}
+
+	var lbport bulbv1alpha1.LBPort
+	err = c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected LBPort to be cleaned up after Service deletion, got err=%v", err)
 	}
 }
 
@@ -212,6 +298,12 @@ func TestReconcile_CleansUpOnTypeChange(t *testing.T) {
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected DaemonSet to be cleaned up, got err=%v", err)
 	}
+
+	var lbport bulbv1alpha1.LBPort
+	err = c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected LBPort to be cleaned up, got err=%v", err)
+	}
 }
 
 func TestServiceMatches(t *testing.T) {
@@ -233,5 +325,116 @@ func TestServiceMatches(t *testing.T) {
 				t.Fatalf("got %v want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func drainEvents(rec *record.FakeRecorder) []string {
+	var events []string
+	for {
+		select {
+		case e, ok := <-rec.Events:
+			if !ok {
+				return events
+			}
+			events = append(events, e)
+		default:
+			return events
+		}
+	}
+}
+
+func hasEventWith(events []string, substr string) bool {
+	for _, e := range events {
+		if strings.Contains(e, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestEmitLBPortEvents_PortOpened(t *testing.T) {
+	svc := newSvc(nil)
+	nodes := []client.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
+	}
+	r, rec, _ := newReconcilerWithRecorder(t, append([]client.Object{svc}, nodes...)...)
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var lbport bulbv1alpha1.LBPort
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport); err != nil {
+		t.Fatalf("get lbport: %v", err)
+	}
+	lbport.Status.AppliedNodes = []string{"node-a", "node-b"}
+	if err := r.Status().Update(context.Background(), &lbport); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	events := drainEvents(rec)
+	if !hasEventWith(events, "FirewallPortOpened") {
+		t.Fatalf("expected FirewallPortOpened event, got %v", events)
+	}
+}
+
+func TestEmitLBPortEvents_PartiallyApplied(t *testing.T) {
+	svc := newSvc(nil)
+	nodes := []client.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-c"}},
+	}
+	r, rec, _ := newReconcilerWithRecorder(t, append([]client.Object{svc}, nodes...)...)
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var lbport bulbv1alpha1.LBPort
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport); err != nil {
+		t.Fatalf("get lbport: %v", err)
+	}
+	lbport.Status.AppliedNodes = []string{"node-a"}
+	if err := r.Status().Update(context.Background(), &lbport); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	events := drainEvents(rec)
+	if !hasEventWith(events, "FirewallPortPartiallyApplied") {
+		t.Fatalf("expected FirewallPortPartiallyApplied event, got %v", events)
+	}
+}
+
+func TestEmitLBPortEvents_PortClosed(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Spec.Ports = []corev1.ServicePort{
+		{Name: "https", Port: 8443, TargetPort: intstr.FromInt32(8443), Protocol: corev1.ProtocolTCP},
+		{Name: "http", Port: 8080, TargetPort: intstr.FromInt32(8080), Protocol: corev1.ProtocolTCP},
+	}
+	r, rec, _ := newReconcilerWithRecorder(t, svc)
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var list bulbv1alpha1.LBPortList
+	if err := r.List(context.Background(), &list); err != nil {
+		t.Fatalf("list lbports: %v", err)
+	}
+	if len(list.Items) != 2 {
+		t.Fatalf("expected 2 lbports, got %d", len(list.Items))
+	}
+
+	var live corev1.Service
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &live); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	live.Spec.Ports = live.Spec.Ports[:1]
+	if err := r.Update(context.Background(), &live); err != nil {
+		t.Fatalf("update service: %v", err)
+	}
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	events := drainEvents(rec)
+	if !hasEventWith(events, "FirewallPortClosed") {
+		t.Fatalf("expected FirewallPortClosed event, got %v", events)
 	}
 }

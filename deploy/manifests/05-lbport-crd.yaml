@@ -1,0 +1,71 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: lbports.bulb.toturi.tech
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: controller
+spec:
+  group: bulb.toturi.tech
+  scope: Cluster
+  names:
+    plural: lbports
+    singular: lbport
+    kind: LBPort
+    shortNames:
+      - lbport
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Port
+          type: integer
+          jsonPath: .spec.port
+        - name: Protocol
+          type: string
+          jsonPath: .spec.protocol
+        - name: Nodes
+          type: string
+          jsonPath: .spec.nodes
+        - name: Applied
+          type: string
+          jsonPath: .status.appliedNodes
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - owner
+                - port
+                - protocol
+              properties:
+                owner:
+                  type: string
+                port:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  maximum: 65535
+                protocol:
+                  type: string
+                  enum:
+                    - TCP
+                    - UDP
+                nodes:
+                  type: array
+                  items:
+                    type: string
+                allowPrivileged:
+                  type: boolean
+            status:
+              type: object
+              properties:
+                appliedNodes:
+                  type: array
+                  items:
+                    type: string
