@@ -110,6 +110,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          # docker/build-push-action uploads a *.dockerbuild build
+          # record artifact alongside our binaries. We don't want it
+          # in the GitHub Release, and its download has been flaky on
+          # the runner — restrict to the binary artifacts only.
+          pattern: bulb-*
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
