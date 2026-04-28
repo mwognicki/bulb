@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -100,6 +101,11 @@ func (r *ServiceReconciler) applyLBPorts(ctx context.Context, desired []bulbv1al
 	for _, item := range existing.Items {
 		if _, ok := keep[item.Name]; ok {
 			continue
+		}
+		if r.EventRecorder != nil {
+			portDesc := fmt.Sprintf("%d/%s", item.Spec.Port, strings.ToLower(string(item.Spec.Protocol)))
+			r.Eventf(svc, corev1.EventTypeNormal, "FirewallPortClosed",
+				"Port %s closed (removed from service)", portDesc)
 		}
 		if err := r.Delete(ctx, item.DeepCopy()); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete stale lbport %s: %w", item.Name, err)
@@ -225,4 +231,72 @@ func (r *ServiceReconciler) pruneStaleAppliedNodes(ctx context.Context, svc *cor
 		}
 	}
 	return nil
+}
+
+func lbPortToService(_ context.Context, obj client.Object) []ctrl.Request {
+	l := obj.GetLabels()
+	svcNs := l[labelServiceNs]
+	svcName := l[labelService]
+	if svcNs == "" || svcName == "" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: svcNs, Name: svcName}}}
+}
+
+func (r *ServiceReconciler) emitLBPortEvents(ctx context.Context, svc *corev1.Service) {
+	if r.EventRecorder == nil {
+		return
+	}
+	var nodeList corev1.NodeList
+	if err := r.List(ctx, &nodeList); err != nil {
+		return
+	}
+	validNodes := make(map[string]struct{}, len(nodeList.Items))
+	for _, node := range nodeList.Items {
+		if !node.Spec.Unschedulable {
+			validNodes[node.Name] = struct{}{}
+		}
+	}
+
+	var lbports bulbv1alpha1.LBPortList
+	if err := r.List(ctx, &lbports, client.MatchingLabels(serviceLabels(svc))); err != nil {
+		return
+	}
+
+	for _, lbport := range lbports.Items {
+		portDesc := fmt.Sprintf("%d/%s", lbport.Spec.Port, strings.ToLower(string(lbport.Spec.Protocol)))
+		applied := appliedCount(lbport.Status.AppliedNodes, validNodes)
+		required := requiredCount(lbport.Spec.Nodes, validNodes)
+
+		if applied >= required && required > 0 {
+			r.Eventf(svc, corev1.EventTypeNormal, "FirewallPortOpened",
+				"Port %s opened on all %d nodes", portDesc, applied)
+		} else if applied > 0 && applied < required {
+			r.Eventf(svc, corev1.EventTypeWarning, "FirewallPortPartiallyApplied",
+				"Port %s applied on %d/%d nodes", portDesc, applied, required)
+		}
+	}
+}
+
+func appliedCount(appliedNodes []string, validNodes map[string]struct{}) int {
+	n := 0
+	for _, name := range appliedNodes {
+		if _, ok := validNodes[name]; ok {
+			n++
+		}
+	}
+	return n
+}
+
+func requiredCount(specNodes []string, validNodes map[string]struct{}) int {
+	if len(specNodes) == 1 && specNodes[0] == allNodesToken {
+		return len(validNodes)
+	}
+	n := 0
+	for _, name := range specNodes {
+		if _, ok := validNodes[name]; ok {
+			n++
+		}
+	}
+	return n
 }

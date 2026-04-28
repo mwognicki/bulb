@@ -59,6 +59,7 @@ func Run(args []string) error {
 	r := &ServiceReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
+		EventRecorder:    mgr.GetEventRecorderFor("bulb-controller"),
 		Namespace:        *namespace,
 		Image:            *image,
 		NodeIPsConfigMap: *nodeIPsCM,
