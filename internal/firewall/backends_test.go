@@ -26,6 +26,23 @@ func TestNewBackend_SupportsAdditionalBackends(t *testing.T) {
 	}
 }
 
+func TestDryRunBackend_DelegatesValidateAndSkipsApply(t *testing.T) {
+	inner := &fakeBackend{}
+	backend, err := NewDryRunBackend(inner)
+	if err != nil {
+		t.Fatalf("new dry-run backend: %v", err)
+	}
+	if err := backend.Validate(context.Background()); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if err := backend.Apply(context.Background(), []PortSpec{{Port: 8443, Protocol: corev1.ProtocolTCP}}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(inner.applied) != 0 {
+		t.Fatalf("expected inner backend not to be mutated, got %+v", inner.applied)
+	}
+}
+
 func TestIPTablesBackend_Validate(t *testing.T) {
 	runner := &recordingRunner{
 		outputs: map[string]string{

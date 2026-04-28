@@ -70,6 +70,12 @@ func Run(args []string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.DryRun {
+		backend, err = NewDryRunBackend(backend)
+		if err != nil {
+			return err
+		}
+	}
 	validateCtx, cancelValidate := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelValidate()
 	if err := backend.Validate(validateCtx); err != nil {
@@ -91,6 +97,7 @@ func Run(args []string) error {
 		NodeName: *nodeName,
 		Backend:  backend,
 		Policy:   FirewallPolicy{DeniedPorts: cfg.DeniedPorts},
+		DryRun:   cfg.DryRun,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup firewall-agent reconciler: %w", err)
@@ -116,6 +123,7 @@ type AgentReconciler struct {
 	NodeName string
 	Backend  Backend
 	Policy   FirewallPolicy
+	DryRun   bool
 
 	mu              sync.Mutex
 	lastDesired     []PortSpec
@@ -143,6 +151,7 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 	logger := ctrl.LoggerFrom(ctx).WithValues(
 		"node", r.NodeName,
 		"backend", r.Backend.Name(),
+		"dry_run", r.DryRun,
 	)
 
 	var lbports bulbv1alpha1.LBPortList
@@ -165,6 +174,10 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 			"filtered_ports", formatPorts(filtered),
 			"rejected", formatRejected(rejected),
 		)
+	}
+	if r.DryRun {
+		dryRunApplyTotal.WithLabelValues(r.Backend.Name()).Inc()
+		logger.Info("dry-run mode active; backend mutation skipped", "would_apply_ports", formatPorts(filtered))
 	}
 	if err := r.Backend.Apply(ctx, filtered); err != nil {
 		r.setLastValidateErr(err)

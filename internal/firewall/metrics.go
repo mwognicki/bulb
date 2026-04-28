@@ -31,10 +31,17 @@ var (
 		},
 		[]string{"backend", "reason"},
 	)
+	dryRunApplyTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "bulb_firewall_dry_run_apply_total",
+			Help: "Number of dry-run firewall apply decisions by backend.",
+		},
+		[]string{"backend"},
+	)
 )
 
 func initMetrics() {
 	registerMetrics.Do(func() {
-		ctrlmetrics.Registry.MustRegister(reconcileTotal, desiredPortsGauge, filteredPortsTotal)
+		ctrlmetrics.Registry.MustRegister(reconcileTotal, desiredPortsGauge, filteredPortsTotal, dryRunApplyTotal)
 	})
 }

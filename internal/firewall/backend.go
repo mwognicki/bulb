@@ -31,3 +31,26 @@ func NewBackend(name string, opts BackendOptions) (Backend, error) {
 		return nil, fmt.Errorf("unsupported firewall backend %q", name)
 	}
 }
+
+type DryRunBackend struct {
+	inner Backend
+}
+
+func NewDryRunBackend(inner Backend) (*DryRunBackend, error) {
+	if inner == nil {
+		return nil, fmt.Errorf("inner backend is required")
+	}
+	return &DryRunBackend{inner: inner}, nil
+}
+
+func (b *DryRunBackend) Name() string {
+	return b.inner.Name()
+}
+
+func (b *DryRunBackend) Validate(ctx context.Context) error {
+	return b.inner.Validate(ctx)
+}
+
+func (b *DryRunBackend) Apply(_ context.Context, _ []PortSpec) error {
+	return nil
+}

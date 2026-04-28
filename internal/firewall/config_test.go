@@ -23,6 +23,7 @@ func TestLoadConfig_UsesDefaultsAndOverrides(t *testing.T) {
 				"zone":        "edge",
 				"stateFile":   "/var/lib/bulb/custom.json",
 				"deniedPorts": "22, 80, 443, 8443",
+				"dryRun":      "true",
 			},
 		}).
 		Build()
@@ -36,6 +37,9 @@ func TestLoadConfig_UsesDefaultsAndOverrides(t *testing.T) {
 	}
 	if len(cfg.DeniedPorts) != 4 || cfg.DeniedPorts[3] != 8443 {
 		t.Fatalf("unexpected denied ports: %+v", cfg.DeniedPorts)
+	}
+	if !cfg.DryRun {
+		t.Fatal("expected dryRun=true")
 	}
 }
 

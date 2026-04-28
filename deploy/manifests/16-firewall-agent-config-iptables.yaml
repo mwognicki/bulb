@@ -11,3 +11,4 @@ data:
   zone: public
   stateFile: /var/lib/bulb/firewall-agent-state.json
   deniedPorts: 22,80,443
+  dryRun: "false"

@@ -198,8 +198,16 @@ The firewall-agent ConfigMap controls the backend and policy knobs that are no l
 - `zone`: zone-style backends such as `firewalld`
 - `stateFile`: node-local tracking file path
 - `deniedPorts`: comma-separated denylist, for example `22,80,443`
+- `dryRun`: when `true`, validate and compute normally but skip firewall mutation
 
 The agent also exports Prometheus metrics on `:9100/metrics`, including reconcile totals, desired port counts, and policy-filtered port counts.
+
+Dry-run mode:
+
+- set `dryRun: "true"` in the selected firewall-agent ConfigMap
+- the agent still validates backend prerequisites and stays subject to readiness checks
+- reconcile logs show the filtered port set that would be applied
+- metrics still reflect desired and filtered ports, and a dedicated dry-run apply counter increments instead of mutating host firewall state
 
 Backend validation behavior:
 

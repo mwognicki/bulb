@@ -23,6 +23,7 @@ type AgentConfig struct {
 	Zone        string
 	StateFile   string
 	DeniedPorts []int32
+	DryRun      bool
 }
 
 func DefaultConfig() AgentConfig {
@@ -31,6 +32,7 @@ func DefaultConfig() AgentConfig {
 		Zone:        defaultZone,
 		StateFile:   defaultStateFile,
 		DeniedPorts: []int32{22, 80, 443},
+		DryRun:      false,
 	}
 }
 
@@ -63,6 +65,13 @@ func LoadConfig(ctx context.Context, c client.Reader, namespace, name string) (A
 			return cfg, fmt.Errorf("parse deniedPorts: %w", err)
 		}
 		cfg.DeniedPorts = ports
+	}
+	if v := strings.TrimSpace(cm.Data["dryRun"]); v != "" {
+		dryRun, err := strconv.ParseBool(v)
+		if err != nil {
+			return cfg, fmt.Errorf("parse dryRun: %w", err)
+		}
+		cfg.DryRun = dryRun
 	}
 	return cfg, nil
 }
