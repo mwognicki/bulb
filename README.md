@@ -94,7 +94,7 @@ The repository currently includes the control-plane manifests and one example wo
 
 Before you deploy:
 
-- Make sure the `ghcr.io/mwognicki/bulb:v0.0.2` image exists and is pullable from your cluster.
+- Make sure the `ghcr.io/mwognicki/bulb:v0.0.3` image exists and is pullable from your cluster.
 - Open the public test port on every node yourself. Phase 1 does not include the firewall agent yet. The bundled example uses port `8080`.
 - Prepare a `node-ips` ConfigMap from [deploy/manifests/30-node-ips.example.yaml](deploy/manifests/30-node-ips.example.yaml), replacing the sample keys with your real Kubernetes node names and the sample values with your real public IPs.
 
