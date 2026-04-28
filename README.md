@@ -142,7 +142,13 @@ kubectl -n echo get svc echo -o yaml
 curl http://<node-public-ip>:8080
 ```
 
-On the current Phase 2 branch there is also a backend-pluggable firewall-agent. The desired-state logic is backend-agnostic, but the only implemented mutating backend today is `firewalld` via D-Bus.
+On the current Phase 2 branch there is also a backend-pluggable firewall-agent. The desired-state logic is backend-agnostic, and the implemented mutating backends today are:
+
+- `firewalld` via D-Bus
+- `iptables` via dedicated `BULB-INPUT` chains in both `iptables` and `ip6tables`
+- `nftables` via a dedicated `inet bulb` table
+
+The shipped manifest still defaults to `firewalld`.
 
 To run that agent too:
 
@@ -175,7 +181,7 @@ The whole project is a single Go binary with subcommands:
 ```sh
 bulb controller       # the reconciler (Deployment)
 bulb proxy            # L4 forwarder (per-Service DaemonSet)
-bulb firewall-agent   # firewalld reconciler (per-node DaemonSet)
+bulb firewall-agent   # per-node firewall reconciler with pluggable backends
 bulb dns-agent        # DNS publisher (Deployment)
 ```
 

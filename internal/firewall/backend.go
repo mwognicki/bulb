@@ -22,6 +22,10 @@ func NewBackend(name string, opts BackendOptions) (Backend, error) {
 			Zone:      opts.Zone,
 			StateFile: opts.StateFile,
 		})
+	case "iptables":
+		return NewIPTablesBackend(IPTablesBackendOptions{})
+	case "nftables":
+		return NewNFTablesBackend(NFTablesBackendOptions{})
 	default:
 		return nil, fmt.Errorf("unsupported firewall backend %q", name)
 	}

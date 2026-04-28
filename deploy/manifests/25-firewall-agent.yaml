@@ -36,6 +36,9 @@ spec:
           args:
             - firewall-agent
             - --node-name=$(NODE_NAME)
+            # Supported backends today: firewalld, iptables, nftables.
+            # This manifest defaults to firewalld because it needs the
+            # system D-Bus socket that is already mounted below.
             - --backend=firewalld
             - --zone=public
             - --state-file=/var/lib/bulb/firewall-agent-state.json
