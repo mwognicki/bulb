@@ -31,17 +31,22 @@ spec:
           type: RuntimeDefault
       containers:
         - name: controller
-          # IMPORTANT: replace at deploy time. The release workflow
-          # publishes ghcr.io/mwognicki/bulb:vX.Y.Z; pin a real tag
-          # rather than tracking a moving label.
-          image: ghcr.io/mwognicki/bulb:REPLACE_ME
+          # Pin a concrete release tag. The release workflow publishes
+          # ghcr.io/mwognicki/bulb:vX.Y.Z on tag push; bump both this
+          # field and BULB_IMAGE below together when upgrading.
+          image: ghcr.io/mwognicki/bulb:v0.0.1
           imagePullPolicy: IfNotPresent
+          env:
+            # Single source of truth for the per-Service proxy
+            # DaemonSet image. Must match the controller's own image
+            # tag above so a controller rollout and the proxy pods it
+            # spawns run the same code.
+            - name: BULB_IMAGE
+              value: ghcr.io/mwognicki/bulb:v0.0.1
           args:
             - controller
             - --namespace=bulb-system
-            # Same image is used by the per-Service proxy DaemonSet —
-            # keep this in sync with the controller image.
-            - --image=ghcr.io/mwognicki/bulb:REPLACE_ME
+            - --image=$(BULB_IMAGE)
             - --node-ips-configmap=node-ips
             - --leader-elect=true
             - --metrics-bind-address=:9100
