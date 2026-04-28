@@ -24,6 +24,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -34,9 +35,8 @@ const allNodesToken = "*"
 func Run(args []string) error {
 	fs := flag.NewFlagSet("firewall-agent", flag.ContinueOnError)
 	nodeName := fs.String("node-name", os.Getenv("NODE_NAME"), "Kubernetes node name this agent instance is responsible for")
-	backendName := fs.String("backend", "firewalld", "firewall backend to use")
-	zone := fs.String("zone", "public", "firewall zone to reconcile for zone-based backends")
-	statePath := fs.String("state-file", "/var/lib/bulb/firewall-agent-state.json", "path to node-local file tracking firewall rules bulb added")
+	configNamespace := fs.String("config-namespace", defaultConfigNamespace, "namespace of the firewall-agent ConfigMap")
+	configName := fs.String("configmap", defaultConfigMapName, "name of the firewall-agent ConfigMap")
 	metricsAddr := fs.String("metrics-bind-address", ":9100", "address the metrics endpoint binds to")
 	probeAddr := fs.String("health-probe-bind-address", ":8081", "address the readiness/liveness probe binds to")
 	if err := fs.Parse(args); err != nil {
@@ -46,21 +46,31 @@ func Run(args []string) error {
 		return fmt.Errorf("--node-name is required (or set NODE_NAME)")
 	}
 
-	backend, err := NewBackend(*backendName, BackendOptions{
-		Zone:      *zone,
-		StateFile: *statePath,
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(bulbv1alpha1.AddToScheme(scheme))
+	initMetrics()
+
+	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
+
+	restConfig := config.GetConfigOrDie()
+	bootstrapClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("create bootstrap client: %w", err)
+	}
+	cfg, err := LoadConfig(context.Background(), bootstrapClient, *configNamespace, *configName)
+	if err != nil {
+		return err
+	}
+	backend, err := NewBackend(cfg.Backend, BackendOptions{
+		Zone:      cfg.Zone,
+		StateFile: cfg.StateFile,
 	})
 	if err != nil {
 		return err
 	}
 
-	scheme := runtime.NewScheme()
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(bulbv1alpha1.AddToScheme(scheme))
-
-	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
-
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: *metricsAddr},
 		HealthProbeBindAddress: *probeAddr,
@@ -74,9 +84,7 @@ func Run(args []string) error {
 		Client:   mgr.GetClient(),
 		NodeName: *nodeName,
 		Backend:  backend,
-		Policy: FirewallPolicy{
-			DeniedPorts: []int32{22, 80, 443},
-		},
+		Policy:   FirewallPolicy{DeniedPorts: cfg.DeniedPorts},
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup firewall-agent reconciler: %w", err)
@@ -132,17 +140,32 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 
 	var lbports bulbv1alpha1.LBPortList
 	if err := r.List(ctx, &lbports); err != nil {
+		reconcileTotal.WithLabelValues(r.Backend.Name(), "error").Inc()
 		return ctrl.Result{}, fmt.Errorf("list lbports: %w", err)
 	}
 
-	desired := DesiredPortsForNode(lbports.Items, r.NodeName)
-	filtered := r.Policy.Filter(desired)
+	rawDesired := DesiredPortsForNode(lbports.Items, r.NodeName)
+	filtered, rejected := r.Policy.Filter(rawDesired)
+	desiredPortsGauge.WithLabelValues(r.NodeName, r.Backend.Name(), "raw").Set(float64(len(rawDesired)))
+	desiredPortsGauge.WithLabelValues(r.NodeName, r.Backend.Name(), "filtered").Set(float64(len(filtered)))
+	for _, reject := range rejected {
+		filteredPortsTotal.WithLabelValues(r.Backend.Name(), reject.Reason).Inc()
+	}
 	if r.setLastDesired(filtered) {
-		logger.Info("desired exposure set changed", "ports", formatPorts(filtered))
+		logger.Info(
+			"desired exposure set changed",
+			"raw_ports", formatPorts(rawDesired),
+			"filtered_ports", formatPorts(filtered),
+			"rejected", formatRejected(rejected),
+		)
 	}
 	if err := r.Backend.Apply(ctx, filtered); err != nil {
+		reconcileTotal.WithLabelValues(r.Backend.Name(), "error").Inc()
+		logger.Error(err, "backend apply failed", "filtered_ports", formatPorts(filtered))
 		return ctrl.Result{}, fmt.Errorf("apply firewall backend %s: %w", r.Backend.Name(), err)
 	}
+	reconcileTotal.WithLabelValues(r.Backend.Name(), "success").Inc()
+	logger.Info("backend apply succeeded", "port_count", len(filtered))
 	return ctrl.Result{}, nil
 }
 
@@ -197,23 +220,31 @@ type FirewallPolicy struct {
 	DeniedPorts []int32
 }
 
-func (p FirewallPolicy) Filter(desired []PortSpec) []PortSpec {
+type RejectedPort struct {
+	PortSpec
+	Reason string
+}
+
+func (p FirewallPolicy) Filter(desired []PortSpec) ([]PortSpec, []RejectedPort) {
 	denied := make(map[int32]struct{}, len(p.DeniedPorts))
 	for _, port := range p.DeniedPorts {
 		denied[port] = struct{}{}
 	}
 
 	out := make([]PortSpec, 0, len(desired))
+	rejected := make([]RejectedPort, 0)
 	for _, spec := range desired {
 		if _, blocked := denied[spec.Port]; blocked {
+			rejected = append(rejected, RejectedPort{PortSpec: spec, Reason: "denylist"})
 			continue
 		}
 		if spec.Port < 1024 && !spec.AllowPrivileged {
+			rejected = append(rejected, RejectedPort{PortSpec: spec, Reason: "privileged"})
 			continue
 		}
 		out = append(out, spec)
 	}
-	return out
+	return out, rejected
 }
 
 func appliesToNode(nodes []string, nodeName string) bool {
@@ -229,6 +260,14 @@ func formatPorts(ports []PortSpec) []string {
 	formatted := make([]string, 0, len(ports))
 	for _, port := range ports {
 		formatted = append(formatted, port.String())
+	}
+	return formatted
+}
+
+func formatRejected(ports []RejectedPort) []string {
+	formatted := make([]string, 0, len(ports))
+	for _, port := range ports {
+		formatted = append(formatted, fmt.Sprintf("%s:%s", port.String(), port.Reason))
 	}
 	return formatted
 }

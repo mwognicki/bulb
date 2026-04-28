@@ -159,10 +159,20 @@ Owned rule space by backend:
 To run that agent too:
 
 ```sh
+kubectl apply -f deploy/manifests/15-firewall-agent-config.yaml
 kubectl apply -f deploy/manifests/25-firewall-agent.yaml
 kubectl -n bulb-system get ds bulb-firewall-agent
 kubectl -n bulb-system logs ds/bulb-firewall-agent
 ```
+
+The firewall-agent ConfigMap controls the backend and policy knobs that are no longer hardcoded in the DaemonSet:
+
+- `backend`: `firewalld`, `iptables`, or `nftables`
+- `zone`: zone-style backends such as `firewalld`
+- `stateFile`: node-local tracking file path
+- `deniedPorts`: comma-separated denylist, for example `22,80,443`
+
+The agent also exports Prometheus metrics on `:9100/metrics`, including reconcile totals, desired port counts, and policy-filtered port counts.
 
 ## Roadmap
 

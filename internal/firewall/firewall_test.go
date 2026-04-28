@@ -63,7 +63,7 @@ func TestDesiredPortsForNode_DefaultsEmptyProtocolToTCP(t *testing.T) {
 func TestFirewallPolicy_Filter(t *testing.T) {
 	policy := FirewallPolicy{DeniedPorts: []int32{22, 80, 443}}
 
-	got := policy.Filter([]PortSpec{
+	got, rejected := policy.Filter([]PortSpec{
 		{Port: 22, Protocol: corev1.ProtocolTCP, AllowPrivileged: true},
 		{Port: 80, Protocol: corev1.ProtocolTCP, AllowPrivileged: true},
 		{Port: 81, Protocol: corev1.ProtocolTCP},
@@ -82,6 +82,9 @@ func TestFirewallPolicy_Filter(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("ports[%d]: got %+v want %+v", i, got[i], want[i])
 		}
+	}
+	if len(rejected) != 3 {
+		t.Fatalf("rejected count: got %d want 3 (%+v)", len(rejected), rejected)
 	}
 }
 

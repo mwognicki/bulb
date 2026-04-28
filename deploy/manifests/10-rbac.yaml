@@ -103,6 +103,19 @@ subjects:
     namespace: bulb-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bulb-firewall-agent
+  namespace: bulb-system
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: firewall-agent
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: bulb-firewall-agent
@@ -124,6 +137,23 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
+  name: bulb-firewall-agent
+subjects:
+  - kind: ServiceAccount
+    name: bulb-firewall-agent
+    namespace: bulb-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bulb-firewall-agent
+  namespace: bulb-system
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: firewall-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
   name: bulb-firewall-agent
 subjects:
   - kind: ServiceAccount
