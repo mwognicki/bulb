@@ -142,7 +142,7 @@ kubectl -n echo get svc echo -o yaml
 curl http://<node-public-ip>:8080
 ```
 
-On the current Phase 2 branch there is also a watch-only firewall-agent slice. It does not change the host firewall yet; it watches `LBPort` objects and computes the desired per-node exposed port set for a future backend.
+On the current Phase 2 branch there is also a backend-pluggable firewall-agent. The desired-state logic is backend-agnostic, but the only implemented mutating backend today is `firewalld` via D-Bus.
 
 To run that agent too:
 

@@ -1,6 +1,7 @@
-// Package firewall implements the bulb firewall-agent. In this Phase 2
-// slice it watches LBPort CRs, computes the desired per-node exposed
-// port set, and surfaces that state without mutating any host firewall.
+// Package firewall implements the bulb firewall-agent. It watches
+// LBPort CRs, computes the desired per-node exposed port set, applies
+// policy filtering, and delegates actual mutation to a pluggable
+// backend. The first concrete backend is firewalld via D-Bus.
 package firewall
 
 import (
@@ -33,6 +34,9 @@ const allNodesToken = "*"
 func Run(args []string) error {
 	fs := flag.NewFlagSet("firewall-agent", flag.ContinueOnError)
 	nodeName := fs.String("node-name", os.Getenv("NODE_NAME"), "Kubernetes node name this agent instance is responsible for")
+	backendName := fs.String("backend", "firewalld", "firewall backend to use")
+	zone := fs.String("zone", "public", "firewall zone to reconcile for zone-based backends")
+	statePath := fs.String("state-file", "/var/lib/bulb/firewall-agent-state.json", "path to node-local file tracking firewall rules bulb added")
 	metricsAddr := fs.String("metrics-bind-address", ":9100", "address the metrics endpoint binds to")
 	probeAddr := fs.String("health-probe-bind-address", ":8081", "address the readiness/liveness probe binds to")
 	if err := fs.Parse(args); err != nil {
@@ -40,6 +44,14 @@ func Run(args []string) error {
 	}
 	if *nodeName == "" {
 		return fmt.Errorf("--node-name is required (or set NODE_NAME)")
+	}
+
+	backend, err := NewBackend(*backendName, BackendOptions{
+		Zone:      *zone,
+		StateFile: *statePath,
+	})
+	if err != nil {
+		return err
 	}
 
 	scheme := runtime.NewScheme()
@@ -61,6 +73,10 @@ func Run(args []string) error {
 	r := &AgentReconciler{
 		Client:   mgr.GetClient(),
 		NodeName: *nodeName,
+		Backend:  backend,
+		Policy: FirewallPolicy{
+			DeniedPorts: []int32{22, 80, 443},
+		},
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup firewall-agent reconciler: %w", err)
@@ -84,22 +100,35 @@ func Run(args []string) error {
 type AgentReconciler struct {
 	client.Client
 	NodeName string
+	Backend  Backend
+	Policy   FirewallPolicy
 
 	mu          sync.Mutex
 	lastDesired []PortSpec
 }
 
 type PortSpec struct {
-	Port     int32
-	Protocol corev1.Protocol
+	Port            int32
+	Protocol        corev1.Protocol
+	AllowPrivileged bool
 }
 
 func (p PortSpec) String() string {
 	return fmt.Sprintf("%d/%s", p.Port, strings.ToLower(string(p.Protocol)))
 }
 
+func (p PortSpec) key() PortKey {
+	return PortKey{Port: p.Port, Protocol: protocolString(p.Protocol)}
+}
+
 func (r *AgentReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
-	logger := ctrl.LoggerFrom(ctx).WithValues("node", r.NodeName)
+	if r.Backend == nil {
+		return ctrl.Result{}, fmt.Errorf("firewall backend is required")
+	}
+	logger := ctrl.LoggerFrom(ctx).WithValues(
+		"node", r.NodeName,
+		"backend", r.Backend.Name(),
+	)
 
 	var lbports bulbv1alpha1.LBPortList
 	if err := r.List(ctx, &lbports); err != nil {
@@ -107,8 +136,12 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 	}
 
 	desired := DesiredPortsForNode(lbports.Items, r.NodeName)
-	if r.setLastDesired(desired) {
-		logger.Info("desired exposure set changed", "ports", formatPorts(desired))
+	filtered := r.Policy.Filter(desired)
+	if r.setLastDesired(filtered) {
+		logger.Info("desired exposure set changed", "ports", formatPorts(filtered))
+	}
+	if err := r.Backend.Apply(ctx, filtered); err != nil {
+		return ctrl.Result{}, fmt.Errorf("apply firewall backend %s: %w", r.Backend.Name(), err)
 	}
 	return ctrl.Result{}, nil
 }
@@ -117,13 +150,16 @@ func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NodeName == "" {
 		return fmt.Errorf("AgentReconciler.NodeName is required")
 	}
+	if r.Backend == nil {
+		return fmt.Errorf("AgentReconciler.Backend is required")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bulbv1alpha1.LBPort{}).
 		Complete(r)
 }
 
 func DesiredPortsForNode(lbports []bulbv1alpha1.LBPort, nodeName string) []PortSpec {
-	seen := make(map[PortSpec]struct{}, len(lbports))
+	seen := make(map[PortKey]PortSpec, len(lbports))
 	for _, lbport := range lbports {
 		if !appliesToNode(lbport.Spec.Nodes, nodeName) {
 			continue
@@ -132,11 +168,20 @@ func DesiredPortsForNode(lbports []bulbv1alpha1.LBPort, nodeName string) []PortS
 		if protocol == "" {
 			protocol = corev1.ProtocolTCP
 		}
-		seen[PortSpec{Port: lbport.Spec.Port, Protocol: protocol}] = struct{}{}
+		key := PortKey{Port: lbport.Spec.Port, Protocol: protocolString(protocol)}
+		current := PortSpec{
+			Port:            lbport.Spec.Port,
+			Protocol:        protocol,
+			AllowPrivileged: lbport.Spec.AllowPrivileged,
+		}
+		if existing, ok := seen[key]; ok && existing.AllowPrivileged {
+			current.AllowPrivileged = true
+		}
+		seen[key] = current
 	}
 
 	out := make([]PortSpec, 0, len(seen))
-	for p := range seen {
+	for _, p := range seen {
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -145,6 +190,29 @@ func DesiredPortsForNode(lbports []bulbv1alpha1.LBPort, nodeName string) []PortS
 		}
 		return out[i].Protocol < out[j].Protocol
 	})
+	return out
+}
+
+type FirewallPolicy struct {
+	DeniedPorts []int32
+}
+
+func (p FirewallPolicy) Filter(desired []PortSpec) []PortSpec {
+	denied := make(map[int32]struct{}, len(p.DeniedPorts))
+	for _, port := range p.DeniedPorts {
+		denied[port] = struct{}{}
+	}
+
+	out := make([]PortSpec, 0, len(desired))
+	for _, spec := range desired {
+		if _, blocked := denied[spec.Port]; blocked {
+			continue
+		}
+		if spec.Port < 1024 && !spec.AllowPrivileged {
+			continue
+		}
+		out = append(out, spec)
+	}
 	return out
 }
 

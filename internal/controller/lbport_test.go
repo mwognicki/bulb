@@ -26,8 +26,26 @@ func TestBuildLBPorts_DefaultsToAllNodes(t *testing.T) {
 	if got[0].Spec.Owner != lbPortOwnerName {
 		t.Fatalf("owner: got %q", got[0].Spec.Owner)
 	}
+	if got[0].Spec.AllowPrivileged {
+		t.Fatal("allowPrivileged: expected false by default")
+	}
 	if !sameStringSet(got[0].Spec.Nodes, []string{"*"}) {
 		t.Fatalf("nodes: got %+v", got[0].Spec.Nodes)
+	}
+}
+
+func TestBuildLBPorts_PropagatesAllowPrivilegedAnnotation(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationAllowPrivilegedPort: "true"}
+	})
+	r, _ := newReconciler(t, svc)
+
+	got, err := r.BuildLBPorts(context.Background(), svc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || !got[0].Spec.AllowPrivileged {
+		t.Fatalf("expected allowPrivileged=true, got %+v", got)
 	}
 }
 

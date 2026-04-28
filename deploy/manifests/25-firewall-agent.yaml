@@ -17,10 +17,10 @@ spec:
         app.kubernetes.io/name: bulb
         app.kubernetes.io/component: firewall-agent
     spec:
+      hostNetwork: true
       serviceAccountName: bulb-firewall-agent
       terminationGracePeriodSeconds: 30
       securityContext:
-        runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -36,8 +36,16 @@ spec:
           args:
             - firewall-agent
             - --node-name=$(NODE_NAME)
+            - --backend=firewalld
+            - --zone=public
+            - --state-file=/var/lib/bulb/firewall-agent-state.json
             - --metrics-bind-address=:9100
             - --health-probe-bind-address=:8081
+          volumeMounts:
+            - name: dbus-socket
+              mountPath: /run/dbus/system_bus_socket
+            - name: state-dir
+              mountPath: /var/lib/bulb
           ports:
             - name: metrics
               containerPort: 9100
@@ -65,6 +73,15 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            runAsNonRoot: true
+            privileged: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: dbus-socket
+          hostPath:
+            path: /run/dbus/system_bus_socket
+            type: Socket
+        - name: state-dir
+          hostPath:
+            path: /var/lib/bulb
+            type: DirectoryOrCreate

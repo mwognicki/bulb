@@ -29,10 +29,11 @@ type LBPort struct {
 }
 
 type LBPortSpec struct {
-	Port     int32           `json:"port"`
-	Protocol corev1.Protocol `json:"protocol"`
-	Nodes    []string        `json:"nodes,omitempty"`
-	Owner    string          `json:"owner,omitempty"`
+	Port            int32           `json:"port"`
+	Protocol        corev1.Protocol `json:"protocol"`
+	Nodes           []string        `json:"nodes,omitempty"`
+	Owner           string          `json:"owner,omitempty"`
+	AllowPrivileged bool            `json:"allowPrivileged,omitempty"`
 }
 
 type LBPortStatus struct {

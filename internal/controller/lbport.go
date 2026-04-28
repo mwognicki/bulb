@@ -45,10 +45,11 @@ func (r *ServiceReconciler) BuildLBPorts(ctx context.Context, svc *corev1.Servic
 				Labels: serviceLabels(svc),
 			},
 			Spec: bulbv1alpha1.LBPortSpec{
-				Port:     p.Port,
-				Protocol: protocol,
-				Nodes:    append([]string(nil), nodes...),
-				Owner:    lbPortOwnerName,
+				Port:            p.Port,
+				Protocol:        protocol,
+				Nodes:           append([]string(nil), nodes...),
+				Owner:           lbPortOwnerName,
+				AllowPrivileged: svc.Annotations[AnnotationAllowPrivilegedPort] == "true",
 			},
 		})
 	}
