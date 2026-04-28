@@ -61,12 +61,12 @@ Per-Service knobs (all optional):
 
 | Annotation | Purpose |
 |---|---|
-| `bulb.io/external-traffic-policy` | `Local` or `Cluster` (default `Cluster`) |
-| `bulb.io/nodes` | Node selector restricting which nodes serve the Service |
-| `bulb.io/dns-name` | FQDN to publish via `dns-agent` |
-| `bulb.io/proxy-protocol` | `v1` or `v2` — wrap upstream connections in PROXY protocol |
-| `bulb.io/keep-on-uninstall` | `"true"` — leave the proxy DaemonSet running if bulb is uninstalled |
-| `bulb.io/allow-privileged-port` | `"true"` — required to claim a port `< 1024` |
+| `bulb.toturi.tech/external-traffic-policy` | `Local` or `Cluster` (default `Cluster`) |
+| `bulb.toturi.tech/nodes` | Node selector restricting which nodes serve the Service |
+| `bulb.toturi.tech/dns-name` | FQDN to publish via `dns-agent` |
+| `bulb.toturi.tech/proxy-protocol` | `v1` or `v2` — wrap upstream connections in PROXY protocol |
+| `bulb.toturi.tech/keep-on-uninstall` | `"true"` — leave the proxy DaemonSet running if bulb is uninstalled |
+| `bulb.toturi.tech/allow-privileged-port` | `"true"` — required to claim a port `< 1024` |
 
 Example:
 
@@ -76,7 +76,7 @@ kind: Service
 metadata:
   name: my-app
   annotations:
-    bulb.io/dns-name: my-app.example.com
+    bulb.toturi.tech/dns-name: my-app.example.com
 spec:
   type: LoadBalancer
   loadBalancerClass: bulb
