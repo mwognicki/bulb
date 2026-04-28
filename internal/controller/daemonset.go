@@ -13,20 +13,20 @@ import (
 
 // Annotation keys; mirror the table in CLAUDE.md.
 const (
-	AnnotationNodes               = "bulb.io/nodes"
-	AnnotationAllowPrivilegedPort = "bulb.io/allow-privileged-port"
+	AnnotationNodes               = "bulb.toturi.tech/nodes"
+	AnnotationAllowPrivilegedPort = "bulb.toturi.tech/allow-privileged-port"
 
 	labelManagedBy   = "app.kubernetes.io/managed-by"
 	labelManagedByV  = "bulb"
-	labelService     = "bulb.io/service"
-	labelServiceNs   = "bulb.io/service-namespace"
+	labelService     = "bulb.toturi.tech/service"
+	labelServiceNs   = "bulb.toturi.tech/service-namespace"
 	containerName    = "proxy"
 	defaultDrainTime = "30s"
 )
 
 // ErrPrivilegedPortDenied is returned when a Service requests a port < 1024
-// without the bulb.io/allow-privileged-port="true" opt-in annotation.
-var ErrPrivilegedPortDenied = errors.New("port < 1024 requires bulb.io/allow-privileged-port=\"true\"")
+// without the bulb.toturi.tech/allow-privileged-port="true" opt-in annotation.
+var ErrPrivilegedPortDenied = errors.New("port < 1024 requires bulb.toturi.tech/allow-privileged-port=\"true\"")
 
 // BuildDaemonSet renders the per-Service proxy DaemonSet. It does not
 // touch the API server — it returns the desired object so callers can
@@ -154,7 +154,7 @@ func portName(p corev1.ServicePort) string {
 	return fmt.Sprintf("p-%d", p.Port)
 }
 
-// nodePlacement parses bulb.io/nodes as a Kubernetes label selector
+// nodePlacement parses bulb.toturi.tech/nodes as a Kubernetes label selector
 // (e.g. "role=edge", "role in (edge,gateway)", "!cordoned") and
 // translates it into a (nodeSelector, nodeAffinity) pair.
 //

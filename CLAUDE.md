@@ -55,7 +55,7 @@ deploy/helm/bulb/             # Helm chart (later)
 docs/design.md                # living design doc
 ```
 
-Namespace for all bulb workloads: `bulb-system`. Annotation/label prefix: `bulb.io/`. LoadBalancerClass: `bulb`. Per-Service DaemonSet name: `bulb-<svc-namespace>-<svc-name>`.
+Namespace for all bulb workloads: `bulb-system`. Annotation/label prefix: `bulb.toturi.tech/`. LoadBalancerClass: `bulb`. Per-Service DaemonSet name: `bulb-<svc-namespace>-<svc-name>`.
 
 ## Phased delivery
 
@@ -72,14 +72,14 @@ Don't build phase N+1 until N is in production.
 ### Service reconciliation
 - Watch Services cluster-wide; act when `spec.type == LoadBalancer` and `spec.loadBalancerClass` is empty or `bulb`.
 - Per Service, create/update DaemonSet `bulb-<ns>-<name>` in `bulb-system`. Single-container pod runs the proxy. `hostPort = spec.ports[*].port`. Args: `--upstream <ClusterIP>:<targetPort>` per port. `dnsPolicy: ClusterFirstWithHostNet`, `hostNetwork: false` (hostPort is enough; keep hostNetwork off to avoid ambient capability).
-- Populate `Service.status.loadBalancer.ingress` from node annotation `bulb.io/public-ipv4` (and v6 if present).
+- Populate `Service.status.loadBalancer.ingress` from node annotation `bulb.toturi.tech/public-ipv4` (and v6 if present).
 - Per-Service annotations:
-  - `bulb.io/external-traffic-policy: Local|Cluster` (default `Cluster`)
-  - `bulb.io/nodes: <selector>` (default: all schedulable)
-  - `bulb.io/dns-name: api.example.com` (opt into DNS)
-  - `bulb.io/proxy-protocol: v1|v2`
-  - `bulb.io/keep-on-uninstall: "true"` (don't GC DS when operator is removed)
-  - `bulb.io/allow-privileged-port: "true"` (required to open ports < 1024)
+  - `bulb.toturi.tech/external-traffic-policy: Local|Cluster` (default `Cluster`)
+  - `bulb.toturi.tech/nodes: <selector>` (default: all schedulable)
+  - `bulb.toturi.tech/dns-name: api.example.com` (opt into DNS)
+  - `bulb.toturi.tech/proxy-protocol: v1|v2`
+  - `bulb.toturi.tech/keep-on-uninstall: "true"` (don't GC DS when operator is removed)
+  - `bulb.toturi.tech/allow-privileged-port: "true"` (required to open ports < 1024)
 - On Service delete or type change, GC the DaemonSet, LBPort CRs, DNSRecord CRs.
 
 ### Proxy dataplane
@@ -94,7 +94,7 @@ Don't build phase N+1 until N is in production.
 
 `firewall-agent` watches LBPort, computes `(port, protocol)` set this node should expose in firewalld's **public zone**, reconciles to match. **Uses firewalld D-Bus API directly** (`org.fedoraproject.FirewallD1`), not `firewall-cmd`. Idempotent: full sync on restart, no rule duplication or loss.
 
-Hard rules: only modifies the `public` zone. Default denylist `{22, 80, 443}` (configurable via ConfigMap). Refuses ports < 1024 unless Service has `bulb.io/allow-privileged-port: "true"`. Tracks applied rules in a node-local file so it never removes rules it didn't add.
+Hard rules: only modifies the `public` zone. Default denylist `{22, 80, 443}` (configurable via ConfigMap). Refuses ports < 1024 unless Service has `bulb.toturi.tech/allow-privileged-port: "true"`. Tracks applied rules in a node-local file so it never removes rules it didn't add.
 
 ### DNS publishing (opt-in)
 `DNSRecord` CRD (`spec: {fqdn, type, ttl, targets, provider}`, `status: {publishedTargets, lastSyncTime}`). v1: Cloudflare only; pluggable provider interface. Health check: TCP-connect to each `(target, service-port)` every 10s; on N=3 consecutive failures, drop target; on M=2 consecutive successes, restore. Failure → record updated within ≤ 30s. Provider credentials in Secret in `bulb-system`; never logged.
@@ -145,7 +145,7 @@ All `v1alpha1` until 1.0, cluster-scoped, status subresource enabled, kubectl pr
 - Language: **Go** (controller-runtime ecosystem). Aligns with Klipper-LB.
 - Single binary, subcommand-dispatched.
 - Leader election: **yes**, even with 1 replica (so rolling updates don't double-reconcile). Use client-go leases.
-- Operator uninstall: GC chain via OwnerReferences by default; `bulb.io/keep-on-uninstall=true` opts out.
+- Operator uninstall: GC chain via OwnerReferences by default; `bulb.toturi.tech/keep-on-uninstall=true` opts out.
 - Two Services on same hostPort: controller refuses second, sets `PortConflict=True` condition.
 - LBPort conflict: `LBPort.spec.owner` (controller name); refuse on conflict. No multi-controller support in v1.
 - Node public IP discovery: ConfigMap (Phase 1) → annotation written by `node-ip-labeler` DaemonSet (Phase 4).
