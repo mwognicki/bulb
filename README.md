@@ -165,6 +165,33 @@ kubectl -n bulb-system get ds bulb-firewall-agent
 kubectl -n bulb-system logs ds/bulb-firewall-agent
 ```
 
+Backend-specific rollout variants:
+
+`firewalld`:
+```sh
+kubectl apply -f deploy/manifests/15-firewall-agent-config.yaml
+kubectl apply -f deploy/manifests/25-firewall-agent.yaml
+kubectl -n bulb-system logs ds/bulb-firewall-agent
+firewall-cmd --zone=public --list-ports
+```
+
+`iptables`:
+```sh
+kubectl apply -f deploy/manifests/16-firewall-agent-config-iptables.yaml
+kubectl apply -f deploy/manifests/26-firewall-agent-iptables.yaml
+kubectl -n bulb-system logs ds/bulb-firewall-agent
+iptables -S BULB-INPUT
+ip6tables -S BULB-INPUT
+```
+
+`nftables`:
+```sh
+kubectl apply -f deploy/manifests/17-firewall-agent-config-nftables.yaml
+kubectl apply -f deploy/manifests/27-firewall-agent-nftables.yaml
+kubectl -n bulb-system logs ds/bulb-firewall-agent
+nft list table inet bulb_firewall_agent
+```
+
 The firewall-agent ConfigMap controls the backend and policy knobs that are no longer hardcoded in the DaemonSet:
 
 - `backend`: `firewalld`, `iptables`, or `nftables`
