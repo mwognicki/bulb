@@ -34,7 +34,7 @@ spec:
           # Pin a concrete release tag. The release workflow publishes
           # ghcr.io/mwognicki/bulb:vX.Y.Z on tag push; bump both this
           # field and BULB_IMAGE below together when upgrading.
-          image: ghcr.io/mwognicki/bulb:v0.0.1
+          image: ghcr.io/mwognicki/bulb:v0.0.2
           imagePullPolicy: IfNotPresent
           env:
             # Single source of truth for the per-Service proxy
@@ -42,7 +42,7 @@ spec:
             # tag above so a controller rollout and the proxy pods it
             # spawns run the same code.
             - name: BULB_IMAGE
-              value: ghcr.io/mwognicki/bulb:v0.0.1
+              value: ghcr.io/mwognicki/bulb:v0.0.2
           args:
             - controller
             - --namespace=bulb-system
