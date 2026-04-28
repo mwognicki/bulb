@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -39,6 +40,7 @@ func Run(args []string) error {
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(bulbv1alpha1.AddToScheme(scheme))
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 

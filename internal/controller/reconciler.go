@@ -72,6 +72,13 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.applyDaemonSet(ctx, desired); err != nil {
 		return ctrl.Result{}, err
 	}
+	lbports, err := r.BuildLBPorts(ctx, &svc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("build lbports: %w", err)
+	}
+	if err := r.applyLBPorts(ctx, lbports, &svc); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	ips, err := r.publicIPs(ctx)
 	if err != nil {
@@ -136,6 +143,9 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 	var ds appsv1.DaemonSet
 	err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: dsName}, &ds)
 	if apierrors.IsNotFound(err) {
+		if err := r.cleanupLBPorts(ctx, svcNamespace, svcName); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 	if err != nil {
@@ -147,6 +157,9 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 	}
 	if err := r.Delete(ctx, &ds); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("delete daemonset: %w", err)
+	}
+	if err := r.cleanupLBPorts(ctx, svcNamespace, svcName); err != nil {
+		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
@@ -228,4 +241,3 @@ func servicePredicate() predicate.Predicate {
 		GenericFunc: func(e event.GenericEvent) bool { return match(e.Object) },
 	}
 }
-

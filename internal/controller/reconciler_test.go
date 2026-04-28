@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -22,6 +23,9 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatalf("add scheme: %v", err)
+	}
+	if err := bulbv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add bulb scheme: %v", err)
 	}
 	return s
 }
@@ -88,6 +92,61 @@ func TestReconcile_CreatesDaemonSetForBulbClass(t *testing.T) {
 	}
 }
 
+func TestReconcile_CreatesLBPortsForService(t *testing.T) {
+	svc := newSvc(nil)
+	r, c := newReconciler(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var lbport bulbv1alpha1.LBPort
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport); err != nil {
+		t.Fatalf("expected LBPort to exist: %v", err)
+	}
+	if lbport.Spec.Port != 8443 || lbport.Spec.Protocol != corev1.ProtocolTCP {
+		t.Fatalf("unexpected lbport spec: %+v", lbport.Spec)
+	}
+	if !sameStringSet(lbport.Spec.Nodes, []string{"*"}) {
+		t.Fatalf("expected wildcard nodes, got %+v", lbport.Spec.Nodes)
+	}
+}
+
+func TestReconcile_CreatesNodeScopedLBPortsWhenSelectorPresent(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationNodes: "role=edge"}
+	nodes := []client.Object{
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node-a",
+				Labels: map[string]string{"role": "edge"},
+			},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node-b",
+				Labels: map[string]string{"role": "edge"},
+			},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node-c",
+				Labels: map[string]string{"role": "db"},
+			},
+		},
+	}
+	objects := append([]client.Object{svc}, nodes...)
+	r, c := newReconciler(t, objects...)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var lbport bulbv1alpha1.LBPort
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport); err != nil {
+		t.Fatalf("expected LBPort to exist: %v", err)
+	}
+	if !sameStringSet(lbport.Spec.Nodes, []string{"node-a", "node-b"}) {
+		t.Fatalf("expected selected nodes, got %+v", lbport.Spec.Nodes)
+	}
+}
+
 func TestReconcile_CleansUpOnServiceDelete(t *testing.T) {
 	svc := newSvc(nil)
 	r, c := newReconciler(t, svc)
@@ -102,6 +161,12 @@ func TestReconcile_CleansUpOnServiceDelete(t *testing.T) {
 	err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected DS to be cleaned up after Service deletion, got err=%v", err)
+	}
+
+	var lbport bulbv1alpha1.LBPort
+	err = c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected LBPort to be cleaned up after Service deletion, got err=%v", err)
 	}
 }
 
@@ -211,6 +276,12 @@ func TestReconcile_CleansUpOnTypeChange(t *testing.T) {
 	err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected DaemonSet to be cleaned up, got err=%v", err)
+	}
+
+	var lbport bulbv1alpha1.LBPort
+	err = c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected LBPort to be cleaned up, got err=%v", err)
 	}
 }
 

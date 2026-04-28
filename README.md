@@ -88,6 +88,60 @@ spec:
       protocol: TCP
 ```
 
+## Trying Phase 1
+
+The repository currently includes the control-plane manifests and one example workload in [deploy/manifests/examples/echo-service.yaml](deploy/manifests/examples/echo-service.yaml).
+
+Before you deploy:
+
+- Make sure the `ghcr.io/mwognicki/bulb:v0.0.2` image exists and is pullable from your cluster.
+- Open the public test port on every node yourself. Phase 1 does not include the firewall agent yet. The bundled example uses port `8080`.
+- Prepare a `node-ips` ConfigMap from [deploy/manifests/30-node-ips.example.yaml](deploy/manifests/30-node-ips.example.yaml), replacing the sample keys with your real Kubernetes node names and the sample values with your real public IPs.
+
+Example `node-ips` ConfigMap:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-ips
+  namespace: bulb-system
+data:
+  your-node-1-name: 203.0.113.10
+  your-node-2-name: 203.0.113.11
+```
+
+Apply the manifests in this order:
+
+```sh
+kubectl apply -f deploy/manifests/00-namespace.yaml
+kubectl apply -f deploy/manifests/05-lbport-crd.yaml
+kubectl apply -f deploy/manifests/10-rbac.yaml
+kubectl apply -f /path/to/your/node-ips.yaml
+kubectl apply -f deploy/manifests/20-controller.yaml
+kubectl -n bulb-system rollout status deploy/bulb-controller
+kubectl apply -f deploy/manifests/examples/echo-service.yaml
+```
+
+What should happen next:
+
+- The controller creates a per-Service DaemonSet in `bulb-system`.
+- The controller also creates one cluster-scoped `LBPort` object per exposed Service port.
+- That DaemonSet schedules one proxy pod per eligible node.
+- The `echo` Service gets `status.loadBalancer.ingress` values from the `node-ips` ConfigMap.
+- Traffic sent to any mapped node public IP on port `8080` is forwarded to the example app on port `80`.
+
+Useful checks:
+
+```sh
+kubectl -n bulb-system get pods
+kubectl -n bulb-system get ds
+kubectl -n bulb-system logs deploy/bulb-controller
+kubectl get lbport
+kubectl -n echo get svc echo -o yaml
+curl http://<node-public-ip>:8080
+```
+
 ## Roadmap
 
 bulb is shipped in phases. Each phase is a real, deployable subset; the next phase doesn't start until the previous one is in production.
