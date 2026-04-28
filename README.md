@@ -150,6 +150,12 @@ On the current Phase 2 branch there is also a backend-pluggable firewall-agent. 
 
 The shipped manifest still defaults to `firewalld`.
 
+Owned rule space by backend:
+
+- `firewalld`: ports listed in the configured zone plus a node-local bulb state file that records which ports bulb added
+- `iptables`: a dedicated `BULB-INPUT` chain, jumped from `INPUT`
+- `nftables`: a dedicated `inet bulb_firewall_agent` table
+
 To run that agent too:
 
 ```sh

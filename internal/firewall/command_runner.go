@@ -10,25 +10,34 @@ import (
 type CommandRunner interface {
 	Run(ctx context.Context, name string, args ...string) error
 	RunInput(ctx context.Context, input string, name string, args ...string) error
+	Output(ctx context.Context, name string, args ...string) (string, error)
 }
 
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s %v: %w: %s", name, args, err, bytes.TrimSpace(output))
-	}
-	return nil
+	_, err := runCombined(ctx, "", name, args...)
+	return err
 }
 
 func (ExecRunner) RunInput(ctx context.Context, input string, name string, args ...string) error {
+	_, err := runCombined(ctx, input, name, args...)
+	return err
+}
+
+func (ExecRunner) Output(ctx context.Context, name string, args ...string) (string, error) {
+	return runCombined(ctx, "", name, args...)
+}
+
+func runCombined(ctx context.Context, input string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdin = bytes.NewBufferString(input)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s %v: %w: %s", name, args, err, bytes.TrimSpace(output))
+	if input != "" {
+		cmd.Stdin = bytes.NewBufferString(input)
 	}
-	return nil
+	output, err := cmd.CombinedOutput()
+	trimmed := string(bytes.TrimSpace(output))
+	if err != nil {
+		return trimmed, fmt.Errorf("%s %v: %w: %s", name, args, err, bytes.TrimSpace(output))
+	}
+	return trimmed, nil
 }

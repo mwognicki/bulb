@@ -79,6 +79,33 @@ func TestFirewalldBackend_Apply_PropagatesClientError(t *testing.T) {
 	}
 }
 
+func TestFirewalldBackend_Apply_PrunesStateWhenTrackedRuleDriftedAway(t *testing.T) {
+	client := &fakeFirewalldClient{
+		current: []PortSpec{{Port: 8080, Protocol: corev1.ProtocolTCP}},
+	}
+	store := &memoryStateStore{
+		keys: []PortKey{
+			{Port: 8080, Protocol: "tcp"},
+			{Port: 9999, Protocol: "tcp"},
+		},
+	}
+	backend := &FirewalldBackend{
+		zone:  "public",
+		store: store,
+		dbus:  client,
+	}
+
+	if err := backend.Apply(context.Background(), []PortSpec{{Port: 8080, Protocol: corev1.ProtocolTCP}}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(client.removed) != 0 {
+		t.Fatalf("expected no remove call for already-drifted port, got %+v", client.removed)
+	}
+	if got, want := specsFromKeys(store.saved), []PortSpec{{Port: 8080, Protocol: corev1.ProtocolTCP}}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("saved state: got %+v want %+v", got, want)
+	}
+}
+
 type fakeFirewalldClient struct {
 	current []PortSpec
 	added   []PortSpec

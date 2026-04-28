@@ -6,21 +6,28 @@ import (
 	"strings"
 )
 
-const nftRulesetTemplate = `table inet bulb {
-	set tcp_ports {
+const (
+	nftTableName  = "bulb_firewall_agent"
+	nftChainName  = "input"
+	nftTCPSetName = "tcp_ports"
+	nftUDPSetName = "udp_ports"
+)
+
+const nftRulesetTemplate = `table inet ` + nftTableName + ` {
+	set ` + nftTCPSetName + ` {
 		type inet_service
 		elements = { %s }
 	}
 
-	set udp_ports {
+	set ` + nftUDPSetName + ` {
 		type inet_service
 		elements = { %s }
 	}
 
-	chain input {
+	chain ` + nftChainName + ` {
 		type filter hook input priority 0;
-		tcp dport @tcp_ports accept
-		udp dport @udp_ports accept
+		tcp dport @` + nftTCPSetName + ` accept
+		udp dport @` + nftUDPSetName + ` accept
 	}
 }
 `
@@ -38,11 +45,16 @@ func NewNFTablesBackend(_ NFTablesBackendOptions) (*NFTablesBackend, error) {
 func (b *NFTablesBackend) Name() string { return "nftables" }
 
 func (b *NFTablesBackend) Apply(ctx context.Context, desired []PortSpec) error {
+	out, err := b.runner.Output(ctx, "nft", "list", "table", "inet", nftTableName)
+	if err != nil && !isNFTNoSuchTable(err) {
+		return fmt.Errorf("inspect nftables table: %w", err)
+	}
+	if strings.TrimSpace(out) != "" && !strings.Contains(out, "table inet "+nftTableName+" {") {
+		return fmt.Errorf("unexpected nftables table output for %s", nftTableName)
+	}
+
 	tcpPorts, udpPorts := splitPortsByProtocol(desired)
 	ruleset := fmt.Sprintf(nftRulesetTemplate, joinPorts(tcpPorts), joinPorts(udpPorts))
-	if err := b.runner.Run(ctx, "nft", "delete", "table", "inet", "bulb"); err != nil && !isNFTNoSuchTable(err) {
-		return fmt.Errorf("delete existing nftables table: %w", err)
-	}
 	if err := b.runner.RunInput(ctx, ruleset, "nft", "-f", "-"); err != nil {
 		return fmt.Errorf("apply nftables ruleset: %w", err)
 	}
