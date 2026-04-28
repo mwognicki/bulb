@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
@@ -202,6 +203,8 @@ type fakeBackend struct {
 
 func (b *fakeBackend) Name() string { return "fake" }
 
+func (b *fakeBackend) Validate(context.Context) error { return b.err }
+
 func (b *fakeBackend) Apply(_ context.Context, desired []PortSpec) error {
 	if b.err != nil {
 		return b.err
@@ -223,5 +226,20 @@ func TestFakeBackend_Error(t *testing.T) {
 	backend := &fakeBackend{err: errors.New("boom")}
 	if err := backend.Apply(context.Background(), nil); err == nil {
 		t.Fatal("expected backend error")
+	}
+}
+
+func TestAgentReconciler_ReadyzReflectsBackendValidation(t *testing.T) {
+	r := &AgentReconciler{
+		NodeName: "node-a",
+		Backend:  &fakeBackend{},
+	}
+	if err := r.readyz(&http.Request{}); err != nil {
+		t.Fatalf("expected readyz success, got %v", err)
+	}
+
+	r.Backend = &fakeBackend{err: errors.New("backend down")}
+	if err := r.readyz(&http.Request{}); err == nil {
+		t.Fatal("expected readyz failure")
 	}
 }

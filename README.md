@@ -174,6 +174,17 @@ The firewall-agent ConfigMap controls the backend and policy knobs that are no l
 
 The agent also exports Prometheus metrics on `:9100/metrics`, including reconcile totals, desired port counts, and policy-filtered port counts.
 
+Backend validation behavior:
+
+- the agent validates the configured backend during startup and fails fast if required host capabilities are missing
+- readiness also re-checks backend availability, so a running pod goes unready if the backend becomes unusable
+
+Practical validation expectations by backend:
+
+- `firewalld`: the system D-Bus socket must be reachable and the configured zone must be queryable
+- `iptables`: both `iptables` and `ip6tables` must be present and their `INPUT` chains must be inspectable
+- `nftables`: the `nft` binary must be present and `nft list tables` must succeed
+
 ## Roadmap
 
 bulb is shipped in phases. Each phase is a real, deployable subset; the next phase doesn't start until the previous one is in production.

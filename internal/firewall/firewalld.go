@@ -50,6 +50,22 @@ func NewFirewalldBackend(opts FirewalldBackendOptions) (*FirewalldBackend, error
 
 func (b *FirewalldBackend) Name() string { return "firewalld" }
 
+func (b *FirewalldBackend) Validate(ctx context.Context) error {
+	if b.zone == "" {
+		return fmt.Errorf("firewalld zone is required")
+	}
+	if b.store == nil {
+		return fmt.Errorf("state store is required")
+	}
+	if b.dbus == nil {
+		return fmt.Errorf("firewalld D-Bus client is required")
+	}
+	if _, err := b.dbus.GetPorts(ctx, b.zone); err != nil {
+		return fmt.Errorf("query zone %s ports: %w", b.zone, err)
+	}
+	return nil
+}
+
 func (b *FirewalldBackend) Apply(ctx context.Context, desired []PortSpec) error {
 	managedKeys, err := b.store.Load()
 	if err != nil {

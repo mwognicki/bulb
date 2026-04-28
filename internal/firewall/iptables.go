@@ -22,6 +22,18 @@ func NewIPTablesBackend(_ IPTablesBackendOptions) (*IPTablesBackend, error) {
 
 func (b *IPTablesBackend) Name() string { return "iptables" }
 
+func (b *IPTablesBackend) Validate(ctx context.Context) error {
+	if b.runner == nil {
+		return fmt.Errorf("command runner is required")
+	}
+	for _, binary := range []string{"iptables", "ip6tables"} {
+		if _, err := b.runner.Output(ctx, binary, "-w", "-S", "INPUT"); err != nil {
+			return fmt.Errorf("inspect %s INPUT chain: %w", binary, err)
+		}
+	}
+	return nil
+}
+
 func (b *IPTablesBackend) Apply(ctx context.Context, desired []PortSpec) error {
 	for _, binary := range []string{"iptables", "ip6tables"} {
 		if err := b.ensureChain(ctx, binary); err != nil {

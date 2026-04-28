@@ -44,6 +44,16 @@ func NewNFTablesBackend(_ NFTablesBackendOptions) (*NFTablesBackend, error) {
 
 func (b *NFTablesBackend) Name() string { return "nftables" }
 
+func (b *NFTablesBackend) Validate(ctx context.Context) error {
+	if b.runner == nil {
+		return fmt.Errorf("command runner is required")
+	}
+	if _, err := b.runner.Output(ctx, "nft", "list", "tables"); err != nil {
+		return fmt.Errorf("list nftables tables: %w", err)
+	}
+	return nil
+}
+
 func (b *NFTablesBackend) Apply(ctx context.Context, desired []PortSpec) error {
 	out, err := b.runner.Output(ctx, "nft", "list", "table", "inet", nftTableName)
 	if err != nil && !isNFTNoSuchTable(err) {

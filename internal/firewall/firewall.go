@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -69,6 +70,11 @@ func Run(args []string) error {
 	if err != nil {
 		return err
 	}
+	validateCtx, cancelValidate := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelValidate()
+	if err := backend.Validate(validateCtx); err != nil {
+		return fmt.Errorf("validate firewall backend %s: %w", backend.Name(), err)
+	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
@@ -93,7 +99,7 @@ func Run(args []string) error {
 	if err := mgr.AddHealthzCheck("ping", healthz); err != nil {
 		return fmt.Errorf("add healthz: %w", err)
 	}
-	if err := mgr.AddReadyzCheck("ping", healthz); err != nil {
+	if err := mgr.AddReadyzCheck("backend", r.readyz); err != nil {
 		return fmt.Errorf("add readyz: %w", err)
 	}
 
@@ -111,8 +117,9 @@ type AgentReconciler struct {
 	Backend  Backend
 	Policy   FirewallPolicy
 
-	mu          sync.Mutex
-	lastDesired []PortSpec
+	mu              sync.Mutex
+	lastDesired     []PortSpec
+	lastValidateErr error
 }
 
 type PortSpec struct {
@@ -160,10 +167,12 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 		)
 	}
 	if err := r.Backend.Apply(ctx, filtered); err != nil {
+		r.setLastValidateErr(err)
 		reconcileTotal.WithLabelValues(r.Backend.Name(), "error").Inc()
 		logger.Error(err, "backend apply failed", "filtered_ports", formatPorts(filtered))
 		return ctrl.Result{}, fmt.Errorf("apply firewall backend %s: %w", r.Backend.Name(), err)
 	}
+	r.setLastValidateErr(nil)
 	reconcileTotal.WithLabelValues(r.Backend.Name(), "success").Inc()
 	logger.Info("backend apply succeeded", "port_count", len(filtered))
 	return ctrl.Result{}, nil
@@ -287,6 +296,26 @@ func (r *AgentReconciler) LastDesired() []PortSpec {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]PortSpec(nil), r.lastDesired...)
+}
+
+func (r *AgentReconciler) readyz(_ *http.Request) error {
+	if r.Backend == nil {
+		return fmt.Errorf("firewall backend is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := r.Backend.Validate(ctx); err != nil {
+		r.setLastValidateErr(err)
+		return fmt.Errorf("backend validation failed: %w", err)
+	}
+	r.setLastValidateErr(nil)
+	return nil
+}
+
+func (r *AgentReconciler) setLastValidateErr(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastValidateErr = err
 }
 
 func healthz(_ *http.Request) error { return nil }

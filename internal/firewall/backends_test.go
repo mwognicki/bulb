@@ -26,6 +26,19 @@ func TestNewBackend_SupportsAdditionalBackends(t *testing.T) {
 	}
 }
 
+func TestIPTablesBackend_Validate(t *testing.T) {
+	runner := &recordingRunner{
+		outputs: map[string]string{
+			"iptables -w -S INPUT":  "-P INPUT ACCEPT",
+			"ip6tables -w -S INPUT": "-P INPUT ACCEPT",
+		},
+	}
+	backend := &IPTablesBackend{runner: runner}
+	if err := backend.Validate(context.Background()); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+}
+
 func TestIPTablesBackend_ApplyBuildsExpectedCommands(t *testing.T) {
 	runner := &recordingRunner{
 		outputs: map[string]string{
@@ -129,6 +142,18 @@ func TestNFTablesBackend_ApplyRendersRuleset(t *testing.T) {
 	}
 	assertContainsCommand(t, runner.commands, "nft list table inet bulb_firewall_agent")
 	assertContainsCommand(t, runner.commands, "nft -f -")
+}
+
+func TestNFTablesBackend_Validate(t *testing.T) {
+	runner := &recordingRunner{
+		outputs: map[string]string{
+			"nft list tables": "table inet bulb_firewall_agent",
+		},
+	}
+	backend := &NFTablesBackend{runner: runner}
+	if err := backend.Validate(context.Background()); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
 }
 
 func TestNFTablesBackend_Apply_RejectsUnexpectedOwnedTable(t *testing.T) {

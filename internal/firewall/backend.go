@@ -7,6 +7,7 @@ import (
 
 type Backend interface {
 	Name() string
+	Validate(ctx context.Context) error
 	Apply(ctx context.Context, desired []PortSpec) error
 }
 

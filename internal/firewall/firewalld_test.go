@@ -49,6 +49,19 @@ func TestFirewalldBackend_Apply_AddsAndRemovesTrackedPorts(t *testing.T) {
 	}
 }
 
+func TestFirewalldBackend_Validate(t *testing.T) {
+	backend := &FirewalldBackend{
+		zone:  "public",
+		store: &memoryStateStore{},
+		dbus: &fakeFirewalldClient{
+			current: []PortSpec{{Port: 8080, Protocol: corev1.ProtocolTCP}},
+		},
+	}
+	if err := backend.Validate(context.Background()); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+}
+
 func TestFirewalldBackend_Apply_DoesNotClaimPreExistingOperatorRule(t *testing.T) {
 	client := &fakeFirewalldClient{
 		current: []PortSpec{{Port: 8443, Protocol: corev1.ProtocolTCP}},
