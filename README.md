@@ -142,6 +142,16 @@ kubectl -n echo get svc echo -o yaml
 curl http://<node-public-ip>:8080
 ```
 
+On the current Phase 2 branch there is also a watch-only firewall-agent slice. It does not change the host firewall yet; it watches `LBPort` objects and computes the desired per-node exposed port set for a future backend.
+
+To run that agent too:
+
+```sh
+kubectl apply -f deploy/manifests/25-firewall-agent.yaml
+kubectl -n bulb-system get ds bulb-firewall-agent
+kubectl -n bulb-system logs ds/bulb-firewall-agent
+```
+
 ## Roadmap
 
 bulb is shipped in phases. Each phase is a real, deployable subset; the next phase doesn't start until the previous one is in production.

@@ -56,7 +56,8 @@ Subcommands:
   controller       Watch Services, reconcile per-Service proxy DaemonSets,
                    emit LBPort and DNSRecord CRs.
   proxy            TCP forwarder dataplane (runs in per-Service pods).
-  firewall-agent   Reconcile firewalld public-zone rules from LBPort CRs.
+  firewall-agent   Watch LBPort CRs and compute the desired per-node
+                   exposure set for a future firewall backend.
   dns-agent        Publish DNSRecord CRs to a DNS provider (Cloudflare).
 `)
 }
