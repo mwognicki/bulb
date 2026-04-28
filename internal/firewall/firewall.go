@@ -18,9 +18,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
 	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -188,6 +190,11 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 	r.setLastValidateErr(nil)
 	reconcileTotal.WithLabelValues(r.Backend.Name(), "success").Inc()
 	logger.Info("backend apply succeeded", "port_count", len(filtered))
+
+	if !r.DryRun {
+		r.updateLBPortStatuses(ctx, logger, lbports.Items, filtered)
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -329,6 +336,77 @@ func (r *AgentReconciler) setLastValidateErr(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lastValidateErr = err
+}
+
+func (r *AgentReconciler) updateLBPortStatuses(ctx context.Context, logger logr.Logger, lbports []bulbv1alpha1.LBPort, applied []PortSpec) {
+	appliedKeys := make(map[PortKey]bool, len(applied))
+	for _, p := range applied {
+		appliedKeys[p.key()] = true
+	}
+
+	for i := range lbports {
+		lbport := &lbports[i]
+		shouldApply := false
+		if appliesToNode(lbport.Spec.Nodes, r.NodeName) {
+			protocol := lbport.Spec.Protocol
+			if protocol == "" {
+				protocol = corev1.ProtocolTCP
+			}
+			key := PortKey{Port: lbport.Spec.Port, Protocol: protocolString(protocol)}
+			shouldApply = appliedKeys[key]
+		}
+
+		if shouldApply {
+			r.ensureNodeInStatus(ctx, logger, lbport)
+		} else {
+			r.ensureNodeNotInStatus(ctx, logger, lbport)
+		}
+	}
+}
+
+func (r *AgentReconciler) ensureNodeInStatus(ctx context.Context, logger logr.Logger, lbport *bulbv1alpha1.LBPort) {
+	var latest bulbv1alpha1.LBPort
+	if err := r.Get(ctx, types.NamespacedName{Name: lbport.Name}, &latest); err != nil {
+		logger.Error(err, "get LBPort for status update", "lbport", lbport.Name)
+		statusUpdateTotal.WithLabelValues(r.Backend.Name(), "error").Inc()
+		return
+	}
+	if slices.Contains(latest.Status.AppliedNodes, r.NodeName) {
+		return
+	}
+	latest.Status.AppliedNodes = append(latest.Status.AppliedNodes, r.NodeName)
+	sort.Strings(latest.Status.AppliedNodes)
+	if err := r.Status().Update(ctx, &latest); err != nil {
+		logger.Error(err, "update LBPort status add node", "lbport", lbport.Name, "node", r.NodeName)
+		statusUpdateTotal.WithLabelValues(r.Backend.Name(), "error").Inc()
+		return
+	}
+	statusUpdateTotal.WithLabelValues(r.Backend.Name(), "success").Inc()
+}
+
+func (r *AgentReconciler) ensureNodeNotInStatus(ctx context.Context, logger logr.Logger, lbport *bulbv1alpha1.LBPort) {
+	var latest bulbv1alpha1.LBPort
+	if err := r.Get(ctx, types.NamespacedName{Name: lbport.Name}, &latest); err != nil {
+		logger.Error(err, "get LBPort for status update", "lbport", lbport.Name)
+		statusUpdateTotal.WithLabelValues(r.Backend.Name(), "error").Inc()
+		return
+	}
+	if !slices.Contains(latest.Status.AppliedNodes, r.NodeName) {
+		return
+	}
+	filtered := make([]string, 0, len(latest.Status.AppliedNodes))
+	for _, n := range latest.Status.AppliedNodes {
+		if n != r.NodeName {
+			filtered = append(filtered, n)
+		}
+	}
+	latest.Status.AppliedNodes = filtered
+	if err := r.Status().Update(ctx, &latest); err != nil {
+		logger.Error(err, "update LBPort status remove node", "lbport", lbport.Name, "node", r.NodeName)
+		statusUpdateTotal.WithLabelValues(r.Backend.Name(), "error").Inc()
+		return
+	}
+	statusUpdateTotal.WithLabelValues(r.Backend.Name(), "success").Inc()
 }
 
 func healthz(_ *http.Request) error { return nil }

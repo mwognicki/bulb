@@ -30,6 +30,9 @@ spec:
         - name: Nodes
           type: string
           jsonPath: .spec.nodes
+        - name: Applied
+          type: string
+          jsonPath: .status.appliedNodes
       schema:
         openAPIV3Schema:
           type: object

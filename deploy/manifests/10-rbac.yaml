@@ -126,6 +126,9 @@ rules:
   - apiGroups: ["bulb.toturi.tech"]
     resources: ["lbports"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["bulb.toturi.tech"]
+    resources: ["lbports/status"]
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

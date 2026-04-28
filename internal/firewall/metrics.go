@@ -38,10 +38,17 @@ var (
 		},
 		[]string{"backend"},
 	)
+	statusUpdateTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "bulb_firewall_lbport_status_update_total",
+			Help: "Number of LBPort status.appliedNodes updates by result.",
+		},
+		[]string{"backend", "result"},
+	)
 )
 
 func initMetrics() {
 	registerMetrics.Do(func() {
-		ctrlmetrics.Registry.MustRegister(reconcileTotal, desiredPortsGauge, filteredPortsTotal, dryRunApplyTotal)
+		ctrlmetrics.Registry.MustRegister(reconcileTotal, desiredPortsGauge, filteredPortsTotal, dryRunApplyTotal, statusUpdateTotal)
 	})
 }
