@@ -33,14 +33,13 @@ Controller (Deployment, 1 replica + leader election)
   - watches Services with type=LoadBalancer
   - reconciles per-Service DaemonSets
   - writes Service.status.loadBalancer.ingress
-  - emits LBPort CRs (firewall) and DNSRecord CRs (DNS)
+  - emits LBPort CRs (firewall) and DNSRecord CRs (DNS dry-run)
         │
         ├── Per-Service DS: proxy pod per node, hostPort=svc port, forwards to ClusterIP:port
-        ├── firewall-agent (DS): on every node, programs firewalld via D-Bus, reconciles LBPort CRs
-        └── dns-agent (Deployment, 1 replica): pushes records to Cloudflare API, reconciles DNSRecord CRs
+        └── firewall-agent (DS): on every node, programs firewalld via D-Bus, reconciles LBPort CRs
 ```
 
-Single binary, multiple subcommands: `bulb controller`, `bulb proxy`, `bulb firewall-agent`, `bulb dns-agent`. Simpler image story.
+Single binary, multiple subcommands: `bulb controller`, `bulb proxy`, `bulb firewall-agent`. `bulb dns-agent` deferred to Phase 5. Simpler image story.
 
 All coordination is through the Kubernetes API. **No component listens on the tailnet or public NIC for control traffic.**
 
@@ -67,9 +66,10 @@ Don't build phase N+1 until N is in production.
     1. Unit tests for `LBPort.status.appliedNodes` writers in the firewall-agent (`updateLBPortStatuses`, `ensureNodeInStatus`, `ensureNodeNotInStatus`): add/remove/idempotency/conflict-retry against a fake client.
     2. Stale node cleanup: the controller already has `lbports/status` RBAC — on each reconcile, diff `appliedNodes` against current cluster nodes and prune entries belonging to nodes that no longer exist or are unschedulable. Prevents orphaned entries when a node is removed while its agent is down.
     3. `FirewallPortOpened` / `FirewallPortClosed` events on the owning Service: the controller should watch LBPort status changes and emit a Kubernetes Event when `appliedNodes` converges to match `spec.nodes` (all agents applied) or when it stalls (partial apply after a timeout). This completes the observability requirement at CLAUDE.md:115.
-- **Phase 3 — Health & DNS.** `DNSRecord` CRD + `dns-agent` + Cloudflare provider. Active TCP health checks per node:port. Failed nodes withdrawn from DNS. Acceptance: kill one node's proxy pod → its IP removed from DNS A record set within 30s.
+- **Phase 3 — DNS dry-run.** Controller computes and surfaces the desired DNS configuration per Service (which node IPs should be in the A record, based on `bulb.toturi.tech/dns-name` annotation). Output via structured log, Service status/conditions, and/or a dry-run `DNSRecord` CR — but **no dns-agent, no health checks, no provider integration yet**. Rationale: target clusters are small, static VPS nodes; IP churn is rare. The operator can use the output to configure DNS manually until automated publishing is justified.
 - **Phase 4 — Polish.** UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, per-node IP discovery (drop static ConfigMap; node annotation written by a tiny `node-ip-labeler` DaemonSet), multi-arch images.
-- **Phase 5 (far future, optional).** Replace userspace TCP splice with SO_REUSEPORT + eBPF sockmap or nftables DNAT + conntrack. More DNS providers. kubectl plugin.
+- **Phase 5 — DNS publishing (optional).** `dns-agent` Deployment + Cloudflare provider. Active TCP health checks per node:port. Failed nodes withdrawn from DNS. Acceptance: kill one node's proxy pod → its IP removed from DNS A record set within 30s.
+- **Phase 6 (far future, optional).** Replace userspace TCP splice with SO_REUSEPORT + eBPF sockmap or nftables DNAT + conntrack. More DNS providers. kubectl plugin.
 
 ## Functional requirements
 
@@ -100,8 +100,11 @@ Don't build phase N+1 until N is in production.
 
 Hard rules: only modifies the `public` zone. Default denylist `{22, 80, 443}` (configurable via ConfigMap). Refuses ports < 1024 unless Service has `bulb.toturi.tech/allow-privileged-port: "true"`. Tracks applied rules in a node-local file so it never removes rules it didn't add.
 
-### DNS publishing (opt-in)
-`DNSRecord` CRD (`spec: {fqdn, type, ttl, targets, provider}`, `status: {publishedTargets, lastSyncTime}`). v1: Cloudflare only; pluggable provider interface. Health check: TCP-connect to each `(target, service-port)` every 10s; on N=3 consecutive failures, drop target; on M=2 consecutive successes, restore. Failure → record updated within ≤ 30s. Provider credentials in Secret in `bulb-system`; never logged.
+### DNS dry-run (Phase 3, opt-in)
+Controller computes the desired DNS A record for a Service when the `bulb.toturi.tech/dns-name` annotation is present. Output channels: structured log line, Service status/conditions, and/or a dry-run `DNSRecord` CR (`spec: {fqdn, type, ttl, targets}`, no provider field). **No agent consumes this yet** — it is informational only, for the operator to act on manually.
+
+### DNS publishing (Phase 5, deferred)
+`dns-agent` Deployment + Cloudflare provider (pluggable). Active TCP health checks per node:port. Failed nodes withdrawn from DNS. Provider credentials in Secret in `bulb-system`; never logged. Not in scope until Phase 5.
 
 ### TLS / ACME coordination (HTTP-01)
 bulb must **cooperate cleanly with cert-manager (or another ACME client) doing HTTP-01 / TLS-ALPN-01 webserver challenges** on ports 80/443. DNS-01 is explicitly *not* the assumed path — operators want to issue certs for arbitrary hostnames pointing at node IPs, including hosts whose DNS isn't managed by `dns-agent`.
@@ -110,18 +113,18 @@ Concrete implications:
 - 80 and 443 stay in the firewall-agent's default denylist — they are operator-managed and already open. bulb never closes them.
 - When a Service requests port 80 or 443 via bulb, the controller treats it as a port-conflict / opt-in case (the operator must explicitly hand those ports to bulb; otherwise ingress-nginx + cert-manager keeps them).
 - The proxy must not strip or rewrite the ACME challenge path (`/.well-known/acme-challenge/...`) — it's an L4 splice, so this is automatic, but don't introduce L7 logic that would break it.
-- When `dns-agent` withdraws a node from a record set due to health failure, certificate renewal for that hostname must still succeed via the remaining nodes — the live target set must always be non-empty when *any* node is healthy, never momentarily empty during reconcile.
-- DNS records published by `dns-agent` should respect a short TTL (default 60s) so freshly-issued certs propagate to clients quickly; ACME validation tolerates this.
+- When `dns-agent` (Phase 5) withdraws a node from a record set due to health failure, certificate renewal for that hostname must still succeed via the remaining nodes — the live target set must always be non-empty when *any* node is healthy, never momentarily empty during reconcile.
+- DNS records published by `dns-agent` (Phase 5) should respect a short TTL (default 60s) so freshly-issued certs propagate to clients quickly; ACME validation tolerates this.
 
 ### Observability
 - Prometheus metrics on `:9100/metrics` from every component (reconcile counts/errors/latency; per-Service active conns / bytes / dial errors; firewalld ops applied/failed / rule count; DNS API calls/errors/last sync).
-- Structured JSON logs via `slog`. One event per significant action; no INFO spam. dns-agent uses a custom slog handler that redacts known secret keys.
-- Events on the Service object for major transitions (`LoadBalancerReconciled`, `FirewallPortOpened`, `DNSTargetWithdrawn`, …).
+- Structured JSON logs via `slog`. One event per significant action; no INFO spam. dns-agent (Phase 5) uses a custom slog handler that redacts known secret keys.
+- Events on the Service object for major transitions (`LoadBalancerReconciled`, `FirewallPortOpened`, `DNSTargetWithdrawn` (Phase 5), …).
 
 ## Non-functional targets
 
 - Service-create → traffic-serving: ≤ 10s.
-- Failover (dead node → DNS rotated out): ≤ 30s after fail threshold; client-perceived ≤ TTL+10s.
+- Failover (dead node → DNS rotated out, Phase 5): ≤ 30s after fail threshold; client-perceived ≤ TTL+10s.
 - Proxy throughput: ≥ 1 Gbps per node for plain TCP splice (single core OK).
 - Proxy memory per active conn: ≤ 32 KiB steady state.
 - Controller cold-start to first reconcile: ≤ 5s.
@@ -130,7 +133,7 @@ Concrete implications:
 
 ## Security
 
-- Least-privilege RBAC. Controller: services, endpointslices, nodes, own CRDs, DaemonSets in `bulb-system` only. Proxy: no API access, no hostNetwork, drop all caps. firewall-agent: hostNetwork + privileged required (firewalld D-Bus); reads CRs only. dns-agent: no host access; reads CRs + Secret; egress to provider API only.
+- Least-privilege RBAC. Controller: services, endpointslices, nodes, own CRDs, DaemonSets in `bulb-system` only. Proxy: no API access, no hostNetwork, drop all caps. firewall-agent: hostNetwork + privileged required (firewalld D-Bus); reads CRs only. dns-agent (Phase 5): no host access; reads CRs + Secret; egress to provider API only.
 - No `panic` outside of `init`. Errors wrapped with context.
 - Image: distroless (`gcr.io/distroless/static`). amd64 minimum, arm64 nice-to-have.
 
@@ -141,7 +144,7 @@ All `v1alpha1` until 1.0, cluster-scoped, status subresource enabled, kubectl pr
 | Kind | Owner | Purpose |
 |---|---|---|
 | `LBPort` | controller | Tells firewall-agents which ports to open on which nodes |
-| `DNSRecord` | controller | Tells dns-agent which records to publish |
+| `DNSRecord` | controller | Dry-run DNS output (Phase 3); consumed by dns-agent in Phase 5 |
 | `LBProvider` (future) | operator | Provider config (e.g. Cloudflare zone ID + API token Secret ref). v1 may use a ConfigMap. |
 
 ## Resolved decisions
@@ -161,6 +164,6 @@ True virtual-IP failover (impossible without floating IPs / BGP / shared L2). Su
 ## Known risks (and what we already decided to do)
 
 - **firewall-agent locks operator out of SSH.** Hardcoded 22 in denylist; agent never removes rules it didn't add (tracked in a node-local file).
-- **Cloudflare token leak via logs.** Token only used in dns-agent; redacting slog handler; integration tests assert no token in stderr.
+- **Cloudflare token leak via logs.** Token only used in dns-agent (Phase 5); redacting slog handler; integration tests assert no token in stderr.
 - **Node IP changes (provider migration / VM rebuild).** `node-ip-labeler` re-runs on boot; controller reconciles status. Document in runbook.
 - **Cilium upgrade breaks ClusterIP semantics.** We rely only on stable kube-proxy / Service CIDR semantics; no Cilium APIs.

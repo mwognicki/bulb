@@ -1,0 +1,57 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: dnsrecords.bulb.toturi.tech
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: controller
+spec:
+  group: bulb.toturi.tech
+  scope: Cluster
+  names:
+    plural: dnsrecords
+    singular: dnsrecord
+    kind: DNSRecord
+    shortNames:
+      - dnsrec
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: FQDN
+          type: string
+          jsonPath: .spec.fqdn
+        - name: Type
+          type: string
+          jsonPath: .spec.type
+        - name: TTL
+          type: integer
+          jsonPath: .spec.ttl
+        - name: Targets
+          type: string
+          jsonPath: .spec.targets
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - fqdn
+              properties:
+                fqdn:
+                  type: string
+                type:
+                  type: string
+                  enum:
+                    - A
+                    - AAAA
+                ttl:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                targets:
+                  type: array
+                  items:
+                    type: string
