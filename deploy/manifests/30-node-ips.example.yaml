@@ -1,0 +1,15 @@
+# Phase 1 placeholder: a flat node-name → public IPv4 map. Phase 4
+# will replace this with node annotations written by node-ip-labeler;
+# delete this ConfigMap then.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-ips
+  namespace: bulb-system
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: controller
+data:
+  node-a: 203.0.113.10
+  node-b: 203.0.113.11
+  node-c: 203.0.113.12

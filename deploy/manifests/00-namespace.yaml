@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bulb-system
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/managed-by: bulb
