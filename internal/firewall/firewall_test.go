@@ -4,14 +4,18 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"testing"
 
+	"github.com/go-logr/logr"
 	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -241,5 +245,293 @@ func TestAgentReconciler_ReadyzReflectsBackendValidation(t *testing.T) {
 	r.Backend = &fakeBackend{err: errors.New("backend down")}
 	if err := r.readyz(&http.Request{}); err == nil {
 		t.Fatal("expected readyz failure")
+	}
+}
+
+func buildFakeClient(t *testing.T, objects ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&bulbv1alpha1.LBPort{}).
+		WithObjects(objects...).
+		Build()
+}
+
+func getAppliedNodes(t *testing.T, c client.Client, name string) []string {
+	t.Helper()
+	var lbport bulbv1alpha1.LBPort
+	if err := c.Get(context.Background(), types.NamespacedName{Name: name}, &lbport); err != nil {
+		t.Fatalf("get lbport %s: %v", name, err)
+	}
+	return lbport.Status.AppliedNodes
+}
+
+func TestEnsureNodeInStatus_AddsNode(t *testing.T) {
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-8080-tcp"},
+		Spec:       bulbv1alpha1.LBPortSpec{Port: 8080, Protocol: corev1.ProtocolTCP},
+	}
+	c := buildFakeClient(t, lbport)
+	r := &AgentReconciler{Client: c, NodeName: "node-a", Backend: &fakeBackend{}}
+
+	r.ensureNodeInStatus(context.Background(), logr.Discard(), lbport)
+
+	got := getAppliedNodes(t, c, "test-8080-tcp")
+	if !slices.Equal(got, []string{"node-a"}) {
+		t.Fatalf("appliedNodes: got %v, want [node-a]", got)
+	}
+}
+
+func TestEnsureNodeInStatus_Idempotent(t *testing.T) {
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-8080-tcp"},
+		Spec:       bulbv1alpha1.LBPortSpec{Port: 8080, Protocol: corev1.ProtocolTCP},
+		Status:     bulbv1alpha1.LBPortStatus{AppliedNodes: []string{"node-a"}},
+	}
+	c := buildFakeClient(t, lbport)
+	r := &AgentReconciler{Client: c, NodeName: "node-a", Backend: &fakeBackend{}}
+
+	r.ensureNodeInStatus(context.Background(), logr.Discard(), lbport)
+
+	got := getAppliedNodes(t, c, "test-8080-tcp")
+	if !slices.Equal(got, []string{"node-a"}) {
+		t.Fatalf("appliedNodes: got %v, want [node-a] (no duplicate)", got)
+	}
+}
+
+func TestEnsureNodeInStatus_AppendsSorted(t *testing.T) {
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-8080-tcp"},
+		Spec:       bulbv1alpha1.LBPortSpec{Port: 8080, Protocol: corev1.ProtocolTCP},
+		Status:     bulbv1alpha1.LBPortStatus{AppliedNodes: []string{"node-c", "node-b"}},
+	}
+	c := buildFakeClient(t, lbport)
+	r := &AgentReconciler{Client: c, NodeName: "node-a", Backend: &fakeBackend{}}
+
+	r.ensureNodeInStatus(context.Background(), logr.Discard(), lbport)
+
+	got := getAppliedNodes(t, c, "test-8080-tcp")
+	want := []string{"node-a", "node-b", "node-c"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("appliedNodes: got %v, want %v", got, want)
+	}
+}
+
+func TestEnsureNodeNotInStatus_RemovesNode(t *testing.T) {
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-8080-tcp"},
+		Spec:       bulbv1alpha1.LBPortSpec{Port: 8080, Protocol: corev1.ProtocolTCP},
+		Status:     bulbv1alpha1.LBPortStatus{AppliedNodes: []string{"node-a", "node-b"}},
+	}
+	c := buildFakeClient(t, lbport)
+	r := &AgentReconciler{Client: c, NodeName: "node-a", Backend: &fakeBackend{}}
+
+	r.ensureNodeNotInStatus(context.Background(), logr.Discard(), lbport)
+
+	got := getAppliedNodes(t, c, "test-8080-tcp")
+	if !slices.Equal(got, []string{"node-b"}) {
+		t.Fatalf("appliedNodes: got %v, want [node-b]", got)
+	}
+}
+
+func TestEnsureNodeNotInStatus_Idempotent(t *testing.T) {
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-8080-tcp"},
+		Spec:       bulbv1alpha1.LBPortSpec{Port: 8080, Protocol: corev1.ProtocolTCP},
+		Status:     bulbv1alpha1.LBPortStatus{AppliedNodes: []string{"node-b"}},
+	}
+	c := buildFakeClient(t, lbport)
+	r := &AgentReconciler{Client: c, NodeName: "node-a", Backend: &fakeBackend{}}
+
+	r.ensureNodeNotInStatus(context.Background(), logr.Discard(), lbport)
+
+	got := getAppliedNodes(t, c, "test-8080-tcp")
+	if !slices.Equal(got, []string{"node-b"}) {
+		t.Fatalf("appliedNodes: got %v, want [node-b] (unchanged)", got)
+	}
+}
+
+func TestEnsureNodeNotInStatus_EmptyListIsNil(t *testing.T) {
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-8080-tcp"},
+		Spec:       bulbv1alpha1.LBPortSpec{Port: 8080, Protocol: corev1.ProtocolTCP},
+		Status:     bulbv1alpha1.LBPortStatus{AppliedNodes: []string{"node-a"}},
+	}
+	c := buildFakeClient(t, lbport)
+	r := &AgentReconciler{Client: c, NodeName: "node-a", Backend: &fakeBackend{}}
+
+	r.ensureNodeNotInStatus(context.Background(), logr.Discard(), lbport)
+
+	got := getAppliedNodes(t, c, "test-8080-tcp")
+	if len(got) != 0 {
+		t.Fatalf("appliedNodes: got %v, want empty", got)
+	}
+}
+
+func TestUpdateLBPortStatuses_AddsAppliedRemovesNotApplied(t *testing.T) {
+	applied := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "applied-8080-tcp"},
+		Spec:       bulbv1alpha1.LBPortSpec{Port: 8080, Protocol: corev1.ProtocolTCP, Nodes: []string{"node-a"}},
+	}
+	notApplied := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "not-applied-9090-tcp"},
+		Spec:       bulbv1alpha1.LBPortSpec{Port: 9090, Protocol: corev1.ProtocolTCP, Nodes: []string{"node-b"}},
+	}
+	stale := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "stale-8443-tcp"},
+		Spec:       bulbv1alpha1.LBPortSpec{Port: 8443, Protocol: corev1.ProtocolTCP, Nodes: []string{"node-a"}},
+		Status:     bulbv1alpha1.LBPortStatus{AppliedNodes: []string{"node-a"}},
+	}
+
+	c := buildFakeClient(t, applied, notApplied, stale)
+	r := &AgentReconciler{Client: c, NodeName: "node-a", Backend: &fakeBackend{}}
+
+	r.updateLBPortStatuses(context.Background(), logr.Discard(),
+		[]bulbv1alpha1.LBPort{*applied, *notApplied, *stale},
+		[]PortSpec{{Port: 8080, Protocol: corev1.ProtocolTCP}},
+	)
+
+	if got := getAppliedNodes(t, c, "applied-8080-tcp"); !slices.Equal(got, []string{"node-a"}) {
+		t.Fatalf("applied: got %v", got)
+	}
+	if got := getAppliedNodes(t, c, "not-applied-9090-tcp"); len(got) != 0 {
+		t.Fatalf("not-applied: got %v, want empty", got)
+	}
+	if got := getAppliedNodes(t, c, "stale-8443-tcp"); len(got) != 0 {
+		t.Fatalf("stale (port not in applied set): got %v, want empty", got)
+	}
+}
+
+func TestReconcile_WritesLBPortStatus(t *testing.T) {
+	scheme := newScheme(t)
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "bulb-demo-echo-8080-tcp"},
+		Spec: bulbv1alpha1.LBPortSpec{
+			Port:     8080,
+			Protocol: corev1.ProtocolTCP,
+			Nodes:    []string{"node-a"},
+			Owner:    "bulb-controller",
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bulbv1alpha1.LBPort{}).
+		WithObjects(lbport).
+		Build()
+
+	r := &AgentReconciler{
+		Client:   c,
+		NodeName: "node-a",
+		Backend:  &fakeBackend{},
+		Policy:   FirewallPolicy{},
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got := getAppliedNodes(t, c, "bulb-demo-echo-8080-tcp")
+	if !slices.Equal(got, []string{"node-a"}) {
+		t.Fatalf("appliedNodes after reconcile: got %v, want [node-a]", got)
+	}
+}
+
+func TestReconcile_DryRun_SkipsStatusUpdate(t *testing.T) {
+	scheme := newScheme(t)
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "bulb-demo-echo-8080-tcp"},
+		Spec: bulbv1alpha1.LBPortSpec{
+			Port:     8080,
+			Protocol: corev1.ProtocolTCP,
+			Nodes:    []string{"node-a"},
+			Owner:    "bulb-controller",
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bulbv1alpha1.LBPort{}).
+		WithObjects(lbport).
+		Build()
+
+	r := &AgentReconciler{
+		Client:   c,
+		NodeName: "node-a",
+		Backend:  &fakeBackend{},
+		Policy:   FirewallPolicy{},
+		DryRun:   true,
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got := getAppliedNodes(t, c, "bulb-demo-echo-8080-tcp")
+	if len(got) != 0 {
+		t.Fatalf("dry-run should not write status, got %v", got)
+	}
+}
+
+func TestReconcile_DeniedPortNotInStatus(t *testing.T) {
+	scheme := newScheme(t)
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "bulb-demo-http-80-tcp"},
+		Spec: bulbv1alpha1.LBPortSpec{
+			Port:     80,
+			Protocol: corev1.ProtocolTCP,
+			Nodes:    []string{"node-a"},
+			Owner:    "bulb-controller",
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bulbv1alpha1.LBPort{}).
+		WithObjects(lbport).
+		Build()
+
+	r := &AgentReconciler{
+		Client:   c,
+		NodeName: "node-a",
+		Backend:  &fakeBackend{},
+		Policy:   FirewallPolicy{DeniedPorts: []int32{80}},
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got := getAppliedNodes(t, c, "bulb-demo-http-80-tcp")
+	if len(got) != 0 {
+		t.Fatalf("denied port should not appear in status, got %v", got)
+	}
+}
+
+func TestReconcile_PortRemovedFromSpec_ClearedFromStatus(t *testing.T) {
+	scheme := newScheme(t)
+	lbport := &bulbv1alpha1.LBPort{
+		ObjectMeta: metav1.ObjectMeta{Name: "bulb-demo-echo-8080-tcp"},
+		Spec: bulbv1alpha1.LBPortSpec{
+			Port:     8080,
+			Protocol: corev1.ProtocolTCP,
+			Nodes:    []string{"node-b"},
+			Owner:    "bulb-controller",
+		},
+		Status: bulbv1alpha1.LBPortStatus{AppliedNodes: []string{"node-a"}},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bulbv1alpha1.LBPort{}).
+		WithObjects(lbport).
+		Build()
+
+	r := &AgentReconciler{
+		Client:   c,
+		NodeName: "node-a",
+		Backend:  &fakeBackend{},
+		Policy:   FirewallPolicy{},
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got := getAppliedNodes(t, c, "bulb-demo-echo-8080-tcp")
+	if len(got) != 0 {
+		t.Fatalf("node removed from spec.nodes should be cleared from status, got %v", got)
 	}
 }
