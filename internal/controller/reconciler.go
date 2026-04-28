@@ -88,6 +88,13 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		logger.Error(err, "read node-ips configmap; status will not be updated this round")
 		return ctrl.Result{}, err
 	}
+
+	dnsRec := BuildDNSRecord(&svc, ips)
+	if err := r.applyDNSRecord(ctx, dnsRec, &svc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("apply dnsrecord: %w", err)
+	}
+	logDNSConfig(ctx, &svc, dnsRec)
+
 	if err := r.updateStatus(ctx, &svc, ips); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update service status: %w", err)
 	}
@@ -149,6 +156,9 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 		if err := r.cleanupLBPorts(ctx, svcNamespace, svcName); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := r.cleanupDNSRecordsByName(ctx, svcNamespace, svcName); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 	if err != nil {
@@ -162,6 +172,9 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 		return ctrl.Result{}, fmt.Errorf("delete daemonset: %w", err)
 	}
 	if err := r.cleanupLBPorts(ctx, svcNamespace, svcName); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.cleanupDNSRecordsByName(ctx, svcNamespace, svcName); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil

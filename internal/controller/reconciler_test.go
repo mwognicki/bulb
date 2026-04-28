@@ -56,7 +56,7 @@ func newReconciler(t *testing.T, objs ...client.Object) (*ServiceReconciler, cli
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objs...).
-		WithStatusSubresource(&corev1.Service{}, &bulbv1alpha1.LBPort{}).
+		WithStatusSubresource(&corev1.Service{}, &bulbv1alpha1.LBPort{}, &bulbv1alpha1.DNSRecord{}).
 		Build()
 	return &ServiceReconciler{
 		Client:           c,
@@ -73,7 +73,7 @@ func newReconcilerWithRecorder(t *testing.T, objs ...client.Object) (*ServiceRec
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objs...).
-		WithStatusSubresource(&corev1.Service{}, &bulbv1alpha1.LBPort{}).
+		WithStatusSubresource(&corev1.Service{}, &bulbv1alpha1.LBPort{}, &bulbv1alpha1.DNSRecord{}).
 		Build()
 	rec := record.NewFakeRecorder(16)
 	return &ServiceReconciler{
