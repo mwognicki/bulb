@@ -32,14 +32,15 @@ var ErrPrivilegedPortDenied = errors.New("port < 1024 requires bulb.toturi.tech/
 // touch the API server — it returns the desired object so callers can
 // Create/Update or diff it as they like.
 //
-// @adr OwnerReference is intentionally not set here. Setting it correctly
-// requires controllerutil.SetControllerReference, which needs a
-// runtime.Scheme — pulling that in would couple this pure builder to
-// controller-runtime. The reconciler (next slice) will wire the
-// OwnerReference (Service → DaemonSet) before calling Create/Update,
-// so cluster-side garbage collection still works. Revisit this
-// decision if BuildDaemonSet is ever called from outside the
-// reconciler.
+// @adr OwnerReferences are deliberately *not* used to track the
+// DS↔Service relationship. The Service lives in the user's namespace
+// (e.g. "demo") while the DS lives in bulb-system; Kubernetes forbids
+// cross-namespace OwnerReferences for namespaced kinds, so cluster-side
+// GC can't help us here. Instead we tag the DS with stable labels
+// (labelService, labelServiceNs, labelManagedBy) and the reconciler
+// performs explicit cleanup on Service delete or type change. Revisit
+// only if bulb ever moves to one DS per namespace alongside the
+// Service, in which case OwnerReferences become viable.
 func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.DaemonSet, error) {
 	if svc == nil {
 		return nil, errors.New("service is nil")
