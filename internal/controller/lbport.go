@@ -182,3 +182,47 @@ func sameStringSet(a, b []string) bool {
 	sort.Strings(bb)
 	return slices.Equal(aa, bb)
 }
+
+func (r *ServiceReconciler) pruneStaleAppliedNodes(ctx context.Context, svc *corev1.Service) error {
+	var nodeList corev1.NodeList
+	if err := r.List(ctx, &nodeList); err != nil {
+		return fmt.Errorf("list nodes for stale cleanup: %w", err)
+	}
+	validNodes := make(map[string]struct{}, len(nodeList.Items))
+	for _, node := range nodeList.Items {
+		if !node.Spec.Unschedulable {
+			validNodes[node.Name] = struct{}{}
+		}
+	}
+
+	var lbports bulbv1alpha1.LBPortList
+	if err := r.List(ctx, &lbports, client.MatchingLabels(serviceLabels(svc))); err != nil {
+		return fmt.Errorf("list lbports for stale cleanup: %w", err)
+	}
+
+	for i := range lbports.Items {
+		lbport := &lbports.Items[i]
+		if len(lbport.Status.AppliedNodes) == 0 {
+			continue
+		}
+		pruned := make([]string, 0, len(lbport.Status.AppliedNodes))
+		for _, name := range lbport.Status.AppliedNodes {
+			if _, ok := validNodes[name]; ok {
+				pruned = append(pruned, name)
+			}
+		}
+		if len(pruned) == len(lbport.Status.AppliedNodes) {
+			continue
+		}
+
+		var latest bulbv1alpha1.LBPort
+		if err := r.Get(ctx, types.NamespacedName{Name: lbport.Name}, &latest); err != nil {
+			return fmt.Errorf("get lbport %s for stale cleanup: %w", lbport.Name, err)
+		}
+		latest.Status.AppliedNodes = pruned
+		if err := r.Status().Update(ctx, &latest); err != nil {
+			return fmt.Errorf("prune stale nodes from lbport %s: %w", lbport.Name, err)
+		}
+	}
+	return nil
+}

@@ -79,6 +79,9 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.applyLBPorts(ctx, lbports, &svc); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.pruneStaleAppliedNodes(ctx, &svc); err != nil {
+		logger.Error(err, "prune stale applied nodes")
+	}
 
 	ips, err := r.publicIPs(ctx)
 	if err != nil {

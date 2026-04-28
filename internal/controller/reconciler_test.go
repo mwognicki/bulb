@@ -54,7 +54,7 @@ func newReconciler(t *testing.T, objs ...client.Object) (*ServiceReconciler, cli
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objs...).
-		WithStatusSubresource(&corev1.Service{}).
+		WithStatusSubresource(&corev1.Service{}, &bulbv1alpha1.LBPort{}).
 		Build()
 	return &ServiceReconciler{
 		Client:           c,
