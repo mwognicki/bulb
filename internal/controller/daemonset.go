@@ -3,7 +3,6 @@ package controller
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -33,8 +32,14 @@ var ErrPrivilegedPortDenied = errors.New("port < 1024 requires bulb.io/allow-pri
 // touch the API server — it returns the desired object so callers can
 // Create/Update or diff it as they like.
 //
-// Caller must set OwnerReferences (typically pointing at the Service)
-// after this returns; we don't take a runtime.Scheme here.
+// @adr OwnerReference is intentionally not set here. Setting it correctly
+// requires controllerutil.SetControllerReference, which needs a
+// runtime.Scheme — pulling that in would couple this pure builder to
+// controller-runtime. The reconciler (next slice) will wire the
+// OwnerReference (Service → DaemonSet) before calling Create/Update,
+// so cluster-side garbage collection still works. Revisit this
+// decision if BuildDaemonSet is ever called from outside the
+// reconciler.
 func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.DaemonSet, error) {
 	if svc == nil {
 		return nil, errors.New("service is nil")
@@ -58,6 +63,11 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.Daemo
 		return nil, err
 	}
 
+	nodeSelector, nodeAffinity, err := nodePlacement(svc.Annotations[AnnotationNodes])
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", AnnotationNodes, err)
+	}
+
 	labels := map[string]string{
 		labelManagedBy: labelManagedByV,
 		labelService:   svc.Name,
@@ -78,7 +88,8 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.Daemo
 					HostNetwork:                   false,
 					DNSPolicy:                     corev1.DNSClusterFirstWithHostNet,
 					TerminationGracePeriodSeconds: ptr[int64](30),
-					NodeSelector:                  parseNodeSelector(svc.Annotations[AnnotationNodes]),
+					NodeSelector:                  nodeSelector,
+					Affinity:                      nodeAffinity,
 					Containers: []corev1.Container{{
 						Name:            containerName,
 						Image:           image,
@@ -143,29 +154,68 @@ func portName(p corev1.ServicePort) string {
 	return fmt.Sprintf("p-%d", p.Port)
 }
 
-// parseNodeSelector turns a comma-separated key=value list into a map.
-// Empty input → nil (DaemonSet schedules everywhere).
-func parseNodeSelector(raw string) map[string]string {
-	raw = strings.TrimSpace(raw)
+// nodePlacement parses bulb.io/nodes as a Kubernetes label selector
+// (e.g. "role=edge", "role in (edge,gateway)", "!cordoned") and
+// translates it into a (nodeSelector, nodeAffinity) pair.
+//
+// matchLabels go to nodeSelector (equality) because that's the cheapest
+// scheduler path; matchExpressions need nodeAffinity because
+// nodeSelector can't express set-based operations.
+//
+// Empty input → (nil, nil): DaemonSet schedules on every node.
+func nodePlacement(raw string) (map[string]string, *corev1.Affinity, error) {
 	if raw == "" {
-		return nil
+		return nil, nil, nil
 	}
-	out := map[string]string{}
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	sel, err := metav1.ParseToLabelSelector(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var nodeSelector map[string]string
+	if len(sel.MatchLabels) > 0 {
+		nodeSelector = sel.MatchLabels
+	}
+
+	if len(sel.MatchExpressions) == 0 {
+		return nodeSelector, nil, nil
+	}
+
+	exprs := make([]corev1.NodeSelectorRequirement, 0, len(sel.MatchExpressions))
+	for _, e := range sel.MatchExpressions {
+		op, err := toNodeSelectorOperator(e.Operator)
+		if err != nil {
+			return nil, nil, err
 		}
-		k, v, ok := strings.Cut(part, "=")
-		if !ok {
-			continue
-		}
-		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		exprs = append(exprs, corev1.NodeSelectorRequirement{
+			Key:      e.Key,
+			Operator: op,
+			Values:   e.Values,
+		})
 	}
-	if len(out) == 0 {
-		return nil
+	affinity := &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: exprs}},
+			},
+		},
 	}
-	return out
+	return nodeSelector, affinity, nil
+}
+
+func toNodeSelectorOperator(op metav1.LabelSelectorOperator) (corev1.NodeSelectorOperator, error) {
+	switch op {
+	case metav1.LabelSelectorOpIn:
+		return corev1.NodeSelectorOpIn, nil
+	case metav1.LabelSelectorOpNotIn:
+		return corev1.NodeSelectorOpNotIn, nil
+	case metav1.LabelSelectorOpExists:
+		return corev1.NodeSelectorOpExists, nil
+	case metav1.LabelSelectorOpDoesNotExist:
+		return corev1.NodeSelectorOpDoesNotExist, nil
+	default:
+		return "", fmt.Errorf("unsupported selector operator %q", op)
+	}
 }
 
 func hardenedSecurityContext() *corev1.SecurityContext {

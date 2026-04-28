@@ -108,7 +108,7 @@ func TestBuildDaemonSet_PrivilegedPort(t *testing.T) {
 	}
 }
 
-func TestBuildDaemonSet_NodeSelector(t *testing.T) {
+func TestBuildDaemonSet_NodePlacement_Equality(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
 		s.Annotations = map[string]string{AnnotationNodes: "role=edge,zone=eu-central"}
 	})
@@ -119,6 +119,69 @@ func TestBuildDaemonSet_NodeSelector(t *testing.T) {
 	got := ds.Spec.Template.Spec.NodeSelector
 	if got["role"] != "edge" || got["zone"] != "eu-central" || len(got) != 2 {
 		t.Fatalf("nodeSelector: got %+v", got)
+	}
+	if ds.Spec.Template.Spec.Affinity != nil {
+		t.Fatalf("equality-only selector should not produce affinity; got %+v", ds.Spec.Template.Spec.Affinity)
+	}
+}
+
+func TestBuildDaemonSet_NodePlacement_SetBased(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationNodes: "role in (edge,gateway),!cordoned"}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ds.Spec.Template.Spec.NodeSelector != nil {
+		t.Fatalf("set-based-only selector should not populate nodeSelector; got %+v", ds.Spec.Template.Spec.NodeSelector)
+	}
+	aff := ds.Spec.Template.Spec.Affinity
+	if aff == nil || aff.NodeAffinity == nil || aff.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		t.Fatalf("expected requiredDuringScheduling node affinity, got %+v", aff)
+	}
+	terms := aff.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) != 1 {
+		t.Fatalf("expected 1 NodeSelectorTerm, got %d", len(terms))
+	}
+	exprs := terms[0].MatchExpressions
+	if len(exprs) != 2 {
+		t.Fatalf("expected 2 matchExpressions, got %d (%+v)", len(exprs), exprs)
+	}
+	want := map[string]corev1.NodeSelectorOperator{
+		"role":     corev1.NodeSelectorOpIn,
+		"cordoned": corev1.NodeSelectorOpDoesNotExist,
+	}
+	for _, e := range exprs {
+		if op, ok := want[e.Key]; !ok || op != e.Operator {
+			t.Errorf("unexpected expression for key %q: %+v", e.Key, e)
+		}
+	}
+}
+
+func TestBuildDaemonSet_NodePlacement_Mixed(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationNodes: "zone=eu-central,role notin (control-plane)"}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ds.Spec.Template.Spec.NodeSelector["zone"] != "eu-central" {
+		t.Fatalf("nodeSelector: got %+v", ds.Spec.Template.Spec.NodeSelector)
+	}
+	aff := ds.Spec.Template.Spec.Affinity
+	if aff == nil || aff.NodeAffinity == nil {
+		t.Fatal("expected affinity for matchExpressions component")
+	}
+}
+
+func TestBuildDaemonSet_NodePlacement_Invalid(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationNodes: "this is not a selector ((("}
+	})
+	if _, err := BuildDaemonSet(svc, "img", "bulb-system"); err == nil {
+		t.Fatal("expected error for invalid label selector")
 	}
 }
 
