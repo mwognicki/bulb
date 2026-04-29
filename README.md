@@ -225,8 +225,6 @@ Helm is intentionally still missing. Before adding `deploy/helm/bulb/`,
 the project should tighten the operator contract that Helm would package:
 
 - Update docs whenever behavior changes; remove stale Phase 1/static ConfigMap language.
-- Enforce Service hostPort conflicts and `LBPort.spec.owner` conflicts, surfacing `PortConflict=True` instead of relying on later DaemonSet or firewall failures.
-- Add Service conditions/events for successful reconciliation, invalid annotations, Local policy without ready endpoints, and conflicts.
 - Define and implement the proxy health contract: listener liveness plus upstream readiness where possible, including a clear UDP-only behavior.
 - Add custom controller/proxy metrics for reconcile outcomes, latency, active connections, bytes, and upstream dial errors.
 - Either implement `bulb.toturi.tech/keep-on-uninstall` or remove it from the documented annotation contract.
@@ -240,10 +238,10 @@ bulb has been built as incremental deployable slices. Current completeness:
 | Phase | Status | Notes |
 |---|---|---|
 | 1. Klipper-clone MVP | Done | Controller creates per-Service proxy DaemonSets; TCP forwarding works; LoadBalancer ingress is populated from Node annotations rather than the original static ConfigMap design. |
-| 2. Firewall agent | Mostly done | `LBPort` CRD and firewall-agent exist with firewalld, iptables, nftables, dry-run mode, validation, status, events, cleanup, and metrics. Remaining work is contract polish around conflicts and Service conditions. |
+| 2. Firewall agent | Mostly done | `LBPort` CRD and firewall-agent exist with firewalld, iptables, nftables, dry-run mode, validation, status, events, cleanup, and metrics. Controller-side Service/LBPort conflict detection now surfaces `PortConflict=True`; remaining work is mostly broader health/metrics contract polish. |
 | 3. DNS dry-run | Done | Controller emits `DNSRecord` CRs that describe desired records. Provider publishing is intentionally deferred. |
-| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, and multi-arch-capable Docker builds are present. Remaining polish is health, metrics, conflict semantics, and release automation. |
-| 5. Packaging and contract hardening | Not started | Next practical focus: status conditions, metrics, proxy health checks, release automation, then Helm. |
+| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, and multi-arch-capable Docker builds are present. Remaining polish is health, metrics, annotation truthfulness, Endpoint API choice, and release automation. |
+| 5. Packaging and contract hardening | Not started | Next practical focus: proxy health checks, controller/proxy metrics, release automation, then Helm. |
 
 ## Building
 

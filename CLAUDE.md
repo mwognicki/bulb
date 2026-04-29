@@ -11,8 +11,10 @@ node annotation based public IP discovery, IPv6, UDP forwarding, PROXY
 protocol, and `externalTrafficPolicy: Local` endpoint routing.
 
 Before adding Helm or optional DNS publishing, tighten the operational
-contract described below: conflict handling, status conditions/events,
-proxy health checks, metrics, and documentation must match the code.
+contract described below. Conflict handling and Service status
+conditions/events are now present; proxy health checks, controller/proxy
+metrics, annotation truthfulness, release automation, and documentation
+must continue to match the code.
 
 ## What bulb is
 
@@ -23,12 +25,12 @@ Hard constraint: total Go LoC budget ≈ 2k. Resist scaffolding everything at on
 ## Environment invariants (do not try to change these)
 
 - A small set of commodity VPS nodes (no cloud-LB, no floating IPs, no shared L2 between nodes). Node count is not load-bearing — don't optimize for or assume any specific number.
-- OS: a current RHEL-family distro — assume "RHEL-like with firewalld + nftables + systemd". Don't hardcode a specific distro or version.
+- OS: Linux nodes with one supported host firewall backend available: firewalld, iptables, or nftables. Don't hardcode a specific distro or version.
 - **Kubernetes: kubeadm v1.36 — pin to this.** APIs and feature gates may be 1.36-specific; bumping is an deliberate project decision, not an automatic upgrade.
 - One static IPv4 (and IPv6) pinned per node; not reassignable.
 - Inter-node: Tailscale tailnet (100.64.0.0/10). Public NICs reachable but not used for control plane.
 - CNI: Cilium (VXLAN over tailnet). PodCIDR `10.244.0.0/16`, ServiceCIDR `10.96.0.0/16`.
-- Host firewall: firewalld (nftables backend). Public zone on default-route NIC; trusted zone on `tailscale0` and pod/service CIDRs.
+- Host firewall: firewalld, iptables, or nftables. The default raw manifest still uses firewalld; iptables and nftables variants also exist.
 - Open public ports today: 22 (optional), 80, 443.
 - kube-proxy in iptables mode.
 
@@ -75,9 +77,9 @@ Namespace for all bulb workloads: `bulb-system`. Annotation/label prefix: `bulb.
 Don't build phase N+1 until N is in production.
 
 - **Phase 1 — Klipper-clone (MVP). Done.** Controller + per-Service proxy DaemonSets. TCP forwarding works and `loadBalancer.ingress` is now populated from Node annotations rather than the original static ConfigMap design.
-- **Phase 2 — Firewall agent. Mostly done.** `LBPort` CRD + `firewall-agent` DaemonSet. The current agent supports firewalld, iptables, and nftables backends, dry-run mode, policy filtering, status updates, status-writer tests, stale applied-node cleanup, firewall events, and firewall-agent metrics. Remaining work is mostly conflict/condition polish.
+- **Phase 2 — Firewall agent. Mostly done.** `LBPort` CRD + `firewall-agent` DaemonSet. The current agent supports firewalld, iptables, and nftables backends, dry-run mode, policy filtering, status updates, status-writer tests, stale applied-node cleanup, firewall events, and firewall-agent metrics. Controller-side Service/LBPort conflict handling is present; remaining work is mostly broader health/metrics contract polish.
 - **Phase 3 — DNS dry-run. Done, provider publishing deferred.** Controller computes and surfaces the desired DNS configuration per Service using `DNSRecord` CRs — but **no dns-agent, no health checks, no provider integration yet**. Rationale: target clusters are small, static VPS nodes; IP churn is rare. The operator can use the output to configure DNS manually until automated publishing is justified.
-- **Phase 4 — Polish. Mostly done.** UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, and multi-arch-capable Docker builds are present. Release automation and contract tightening remain.
+- **Phase 4 — Polish. Mostly done.** UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, and multi-arch-capable Docker builds are present. Release automation and the remaining contract-tightening items still remain.
   - Per-node IP discovery is done: `node-ip-labeler` DaemonSet discovers public IPs from the default-route interface and annotates Nodes with `bulb.toturi.tech/public-ipv4` and `bulb.toturi.tech/public-ipv6`. The controller reads node annotations instead of the static ConfigMap. The static `node-ips` ConfigMap is deprecated.
 - **Phase 5 — DNS publishing (optional, deferred).** Provider integrations and active DNS target health checks are intentionally out of the current contract-tightening scope.
 - **Phase 6 (far future, optional).** Replace userspace TCP splice with SO_REUSEPORT + eBPF sockmap or nftables DNAT + conntrack. More DNS providers. kubectl plugin.
@@ -105,30 +107,22 @@ freeze the current rough edges:
 1. **Refresh docs continuously.** Keep this file and README aligned with
    shipped behavior. Remove stale Phase 1/static ConfigMap instructions
    whenever they reappear.
-2. **Service and LBPort conflict handling.** Enforce same-hostPort
-   conflicts between Services and set `PortConflict=True` on the owning
-   Service. Detect existing `LBPort.spec.owner` conflicts instead of
-   blindly overwriting objects with colliding names.
-3. **Status conditions and events.** Add first-class Service conditions
-   for conflict, invalid annotations, Local policy with no ready
-   endpoints, and successful reconciliation. Emit `LoadBalancerReconciled`
-   in addition to existing firewall events.
-4. **Proxy health contract.** Replace the current basic TCP socket
+2. **Proxy health contract.** Replace the current basic TCP socket
    readiness probe with an explicit proxy health/readiness surface:
    liveness should prove listeners are alive, and readiness should
    reflect upstream reachability where possible. Define acceptable
    behavior for UDP-only Services.
-5. **Metrics.** Add custom controller/proxy metrics beyond the default
+3. **Metrics.** Add custom controller/proxy metrics beyond the default
    controller-runtime metrics: reconcile counts/errors/latency,
    per-Service active connections, bytes, and upstream dial errors.
-6. **Annotation truthfulness.** Either implement
+4. **Annotation truthfulness.** Either implement
    `bulb.toturi.tech/keep-on-uninstall` or remove it from the public
    contract. Today it is documented but not wired into behavior.
-7. **Endpoints API decision.** The Local policy implementation currently
+5. **Endpoints API decision.** The Local policy implementation currently
    uses core `Endpoints`; either move to EndpointSlices or update the
    security/RBAC documentation to bless `Endpoints` for this small-cluster
    design.
-8. **Release path.** Document and automate multi-arch image publishing
+6. **Release path.** Document and automate multi-arch image publishing
    before Helm references versioned images as an install path.
 
 ### Proxy dataplane
@@ -164,7 +158,7 @@ Concrete implications:
 ### Observability
 - Prometheus metrics on `:9100/metrics` from every component (reconcile counts/errors/latency; per-Service active conns / bytes / dial errors; firewalld ops applied/failed / rule count; DNS API calls/errors/last sync).
 - Structured JSON logs via `slog`. One event per significant action; no INFO spam. dns-agent (Phase 5) should use a custom slog handler that redacts known secret keys.
-- Events on the Service object for major transitions (`LoadBalancerReconciled`, `FirewallPortOpened`, `DNSTargetWithdrawn` (Phase 5), …).
+- Events on the Service object for major transitions (`Reconciled`, `ServicePortConflict`, `LBPortOwnerConflict`, `InvalidAnnotation`, `NoReadyEndpoints`, `FirewallPortOpened`, `DNSTargetWithdrawn` (Phase 5), …).
 
 ## Non-functional targets
 
@@ -197,7 +191,7 @@ All `v1alpha1` until 1.0, cluster-scoped, status subresource enabled, kubectl pr
 - Language: **Go** (controller-runtime ecosystem). Aligns with Klipper-LB.
 - Single binary, subcommand-dispatched.
 - Leader election: **yes**, even with 1 replica (so rolling updates don't double-reconcile). Use client-go leases.
-- Operator uninstall: GC chain via OwnerReferences by default; `bulb.toturi.tech/keep-on-uninstall=true` opts out.
+- Operator uninstall: explicit cleanup is implemented for Service delete/type change. `bulb.toturi.tech/keep-on-uninstall=true` is documented as planned, but not implemented yet.
 - Two Services on same hostPort: controller refuses second, sets `PortConflict=True` condition.
 - LBPort conflict: `LBPort.spec.owner` (controller name); refuse on conflict. No multi-controller support in v1.
 - Node public IP discovery: ~~ConfigMap (Phase 1)~~ → node annotations written by `node-ip-labeler` DaemonSet (Phase 4, done).

@@ -51,6 +51,16 @@ func newSvc(class *string) *corev1.Service {
 	}
 }
 
+func namedSvc(namespace, name string, port int32) *corev1.Service {
+	svc := newSvc(nil)
+	svc.Namespace = namespace
+	svc.Name = name
+	svc.UID = types.UID(namespace + "-" + name)
+	svc.Spec.Ports[0].Port = port
+	svc.Spec.Ports[0].TargetPort = intstr.FromInt32(port)
+	return svc
+}
+
 func newReconciler(t *testing.T, objs ...client.Object) (*ServiceReconciler, client.Client) {
 	t.Helper()
 	scheme := newScheme(t)
@@ -409,6 +419,164 @@ func hasEventWith(events []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+func serviceConditionStatus(t *testing.T, c client.Client, svc *corev1.Service, typ string) metav1.ConditionStatus {
+	t.Helper()
+	var got corev1.Service
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &got); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	for _, condition := range got.Status.Conditions {
+		if condition.Type == typ {
+			return condition.Status
+		}
+	}
+	t.Fatalf("missing condition %s in %+v", typ, got.Status.Conditions)
+	return metav1.ConditionUnknown
+}
+
+func TestReconcile_SetsSuccessfulConditionsAndEvent(t *testing.T) {
+	svc := newSvc(nil)
+	r, rec, c := newReconcilerWithRecorder(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionReconciled); got != metav1.ConditionTrue {
+		t.Fatalf("Reconciled condition: got %s want True", got)
+	}
+	if got := serviceConditionStatus(t, c, svc, ConditionPortConflict); got != metav1.ConditionFalse {
+		t.Fatalf("PortConflict condition: got %s want False", got)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "Reconciled") {
+		t.Fatalf("expected Reconciled event, got %v", events)
+	}
+}
+
+func TestReconcile_PortConflictSetsConditionAndSkipsObjects(t *testing.T) {
+	svc := namedSvc("demo", "echo", 8443)
+	other := namedSvc("other", "api", 8443)
+	r, rec, c := newReconcilerWithRecorder(t, svc, other)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionPortConflict); got != metav1.ConditionTrue {
+		t.Fatalf("PortConflict condition: got %s want True", got)
+	}
+	if got := serviceConditionStatus(t, c, svc, ConditionReconciled); got != metav1.ConditionFalse {
+		t.Fatalf("Reconciled condition: got %s want False", got)
+	}
+	var ds appsv1.DaemonSet
+	err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no DaemonSet for conflicted service, got err=%v", err)
+	}
+	var lbport bulbv1alpha1.LBPort
+	err = c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no LBPort for conflicted service, got err=%v", err)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "ServicePortConflict") {
+		t.Fatalf("expected ServicePortConflict event, got %v", events)
+	}
+}
+
+func TestReconcile_DisjointNodeSelectorsCanSharePort(t *testing.T) {
+	svc := namedSvc("demo", "echo", 8443)
+	svc.Annotations = map[string]string{AnnotationNodes: "role=edge"}
+	other := namedSvc("other", "api", 8443)
+	other.Annotations = map[string]string{AnnotationNodes: "role=db"}
+	nodes := []client.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{"role": "edge"}}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{"role": "db"}}},
+	}
+	objects := append([]client.Object{svc, other}, nodes...)
+	r, c := newReconciler(t, objects...)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionPortConflict); got != metav1.ConditionFalse {
+		t.Fatalf("PortConflict condition: got %s want False", got)
+	}
+	var lbport bulbv1alpha1.LBPort
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport); err != nil {
+		t.Fatalf("expected LBPort for disjoint node selector: %v", err)
+	}
+	if !sameStringSet(lbport.Spec.Nodes, []string{"node-a"}) {
+		t.Fatalf("expected selected node-a, got %+v", lbport.Spec.Nodes)
+	}
+}
+
+func TestReconcile_LBPortOwnerConflictSetsCondition(t *testing.T) {
+	svc := newSvc(nil)
+	existing := &bulbv1alpha1.LBPort{
+		TypeMeta: metav1.TypeMeta{APIVersion: bulbv1alpha1.GroupVersion.String(), Kind: "LBPort"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "bulb-demo-echo-8443-tcp",
+		},
+		Spec: bulbv1alpha1.LBPortSpec{
+			Port:     8443,
+			Protocol: corev1.ProtocolTCP,
+			Nodes:    []string{"*"},
+			Owner:    "someone-else",
+		},
+	}
+	r, rec, c := newReconcilerWithRecorder(t, svc, existing)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionPortConflict); got != metav1.ConditionTrue {
+		t.Fatalf("PortConflict condition: got %s want True", got)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "LBPortOwnerConflict") {
+		t.Fatalf("expected LBPortOwnerConflict event, got %v", events)
+	}
+}
+
+func TestReconcile_InvalidAnnotationSetsCondition(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationNodes: "role in ("}
+	r, rec, c := newReconcilerWithRecorder(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionInvalidService); got != metav1.ConditionTrue {
+		t.Fatalf("InvalidService condition: got %s want True", got)
+	}
+	if got := serviceConditionStatus(t, c, svc, ConditionReconciled); got != metav1.ConditionFalse {
+		t.Fatalf("Reconciled condition: got %s want False", got)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "InvalidAnnotation") {
+		t.Fatalf("expected InvalidAnnotation event, got %v", events)
+	}
+}
+
+func TestReconcile_LocalPolicyWithoutReadyEndpointsSetsCondition(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationExternalTrafficPolicy: "Local"}
+	r, rec, c := newReconcilerWithRecorder(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionNoReadyEndpoint); got != metav1.ConditionTrue {
+		t.Fatalf("NoReadyEndpoints condition: got %s want True", got)
+	}
+	if got := serviceConditionStatus(t, c, svc, ConditionReconciled); got != metav1.ConditionFalse {
+		t.Fatalf("Reconciled condition: got %s want False", got)
+	}
+	var ds appsv1.DaemonSet
+	err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no DaemonSet without ready Local endpoints, got err=%v", err)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "NoReadyEndpoints") {
+		t.Fatalf("expected NoReadyEndpoints event, got %v", events)
+	}
 }
 
 func TestEmitLBPortEvents_PortOpened(t *testing.T) {
