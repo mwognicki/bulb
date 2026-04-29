@@ -20,79 +20,163 @@ import (
 // Run is the `bulb proxy` subcommand entrypoint.
 func Run(args []string) error {
 	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
-	var pairs multiFlag
-	fs.Var(&pairs, "upstream", "listen=upstream pair, e.g. 0.0.0.0:8443=10.96.1.5:8443 (repeatable)")
+	var tcpPairs, udpPairs multiFlag
+	fs.Var(&tcpPairs, "upstream", "TCP listen=upstream pair, e.g. 0.0.0.0:8443=10.96.1.5:8443 (repeatable)")
+	fs.Var(&udpPairs, "udp-upstream", "UDP listen=upstream pair, e.g. 0.0.0.0:53=10.96.1.5:53 (repeatable)")
 	drain := fs.Duration("drain-timeout", 30*time.Second, "max time to wait for in-flight connections after SIGTERM")
+	udpIdle := fs.Duration("udp-idle-timeout", 30*time.Second, "tear down UDP session after this much silence on both sides")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if len(pairs) == 0 {
-		return errors.New("at least one --upstream listen=upstream pair is required")
+	if len(tcpPairs) == 0 && len(udpPairs) == 0 {
+		return errors.New("at least one --upstream or --udp-upstream pair is required")
 	}
 
-	specs, err := parsePairs(pairs)
+	specs, err := parsePairsWithProtocol(tcpPairs, ProtocolTCP)
 	if err != nil {
 		return err
 	}
+	udpSpecs, err := parsePairsWithProtocol(udpPairs, ProtocolUDP)
+	if err != nil {
+		return err
+	}
+	specs = append(specs, udpSpecs...)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	return Serve(ctx, specs, *drain, logger)
+	return Serve(ctx, specs, ServeOptions{DrainTimeout: *drain, UDPIdleTimeout: *udpIdle}, logger)
 }
 
-// Spec is a single listen=upstream forwarding rule.
+// Protocol identifies the wire protocol of a Spec.
+type Protocol string
+
+const (
+	ProtocolTCP Protocol = "tcp"
+	ProtocolUDP Protocol = "udp"
+)
+
+// Spec is a single listen=upstream forwarding rule. Protocol defaults to
+// TCP when empty.
 type Spec struct {
 	Listen   string
 	Upstream string
+	Protocol Protocol
 }
 
-// Serve binds every spec, accepts connections, and splices them to the
-// matching upstream. It returns when ctx is canceled and either all
-// in-flight connections have finished or the drain timeout elapsed.
-func Serve(ctx context.Context, specs []Spec, drainTimeout time.Duration, logger *slog.Logger) error {
+// ServeOptions tunes Serve. Zero values are sensible defaults.
+type ServeOptions struct {
+	// DrainTimeout caps how long Serve waits for in-flight TCP
+	// connections after ctx is canceled. Default 30s.
+	DrainTimeout time.Duration
+	// UDPIdleTimeout tears down a per-client UDP session after this much
+	// silence in both directions. Default 30s.
+	UDPIdleTimeout time.Duration
+}
+
+// Serve binds every spec, accepts (TCP) or reads (UDP), and forwards to
+// the matching upstream. It returns when ctx is canceled and either all
+// in-flight TCP connections have finished or the drain timeout elapsed.
+// UDP sessions tear down on idle timeout regardless.
+func Serve(ctx context.Context, specs []Spec, opts ServeOptions, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
+	if opts.DrainTimeout <= 0 {
+		opts.DrainTimeout = 30 * time.Second
+	}
+	if opts.UDPIdleTimeout <= 0 {
+		opts.UDPIdleTimeout = 30 * time.Second
+	}
 
 	var (
-		listeners []net.Listener
-		conns     sync.WaitGroup
+		tcpListeners []net.Listener
+		tcpUpstreams []string
+		udpConns     []net.PacketConn
+		udpUpstreams []string
+		conns        sync.WaitGroup
 	)
-	for _, spec := range specs {
-		l, err := net.Listen("tcp", spec.Listen)
-		if err != nil {
-			closeAll(listeners)
-			return fmt.Errorf("listen %s: %w", spec.Listen, err)
+	closeAllOpened := func() {
+		closeAll(tcpListeners)
+		for _, c := range udpConns {
+			_ = c.Close()
 		}
-		listeners = append(listeners, l)
-		logger.Info("listening", "addr", l.Addr().String(), "upstream", spec.Upstream)
+	}
+	for _, spec := range specs {
+		switch spec.protocol() {
+		case ProtocolTCP:
+			l, err := net.Listen("tcp", spec.Listen)
+			if err != nil {
+				closeAllOpened()
+				return fmt.Errorf("listen tcp %s: %w", spec.Listen, err)
+			}
+			tcpListeners = append(tcpListeners, l)
+			tcpUpstreams = append(tcpUpstreams, spec.Upstream)
+			logger.Info("listening", "proto", "tcp", "addr", l.Addr().String(), "upstream", spec.Upstream)
+		case ProtocolUDP:
+			pc, err := net.ListenPacket("udp", spec.Listen)
+			if err != nil {
+				closeAllOpened()
+				return fmt.Errorf("listen udp %s: %w", spec.Listen, err)
+			}
+			udpConns = append(udpConns, pc)
+			udpUpstreams = append(udpUpstreams, spec.Upstream)
+			logger.Info("listening", "proto", "udp", "addr", pc.LocalAddr().String(), "upstream", spec.Upstream)
+		default:
+			closeAllOpened()
+			return fmt.Errorf("unsupported protocol %q on %s", spec.Protocol, spec.Listen)
+		}
 	}
 
 	acceptCtx, cancelAccept := context.WithCancel(ctx)
 	defer cancelAccept()
 
 	var accepts sync.WaitGroup
-	for i, l := range listeners {
+	for i, l := range tcpListeners {
 		accepts.Add(1)
 		go func(l net.Listener, upstream string) {
 			defer accepts.Done()
 			acceptLoop(acceptCtx, l, upstream, &conns, logger)
-		}(l, specs[i].Upstream)
+		}(l, tcpUpstreams[i])
+	}
+	udpForwarders := make([]*udpForwarder, 0, len(udpConns))
+	for i, pc := range udpConns {
+		f := newUDPForwarder(pc, udpUpstreams[i], opts.UDPIdleTimeout, logger)
+		udpForwarders = append(udpForwarders, f)
+		accepts.Add(1)
+		go func(f *udpForwarder) {
+			defer accepts.Done()
+			f.run(acceptCtx)
+		}(f)
 	}
 
 	<-ctx.Done()
-	logger.Info("shutdown initiated", "drain_timeout", drainTimeout.String())
-	closeAll(listeners)
+	logger.Info("shutdown initiated", "drain_timeout", opts.DrainTimeout.String())
+	cancelAccept()
+	closeAll(tcpListeners)
+	for _, pc := range udpConns {
+		_ = pc.Close()
+	}
 	accepts.Wait()
 
-	if waitTimeout(&conns, drainTimeout) {
+	for _, f := range udpForwarders {
+		f.closeAllSessions()
+	}
+
+	if waitTimeout(&conns, opts.DrainTimeout) {
 		logger.Info("drained cleanly")
 	} else {
 		logger.Warn("drain timeout exceeded; closing remaining connections")
 	}
 	return nil
+}
+
+func (s Spec) protocol() Protocol {
+	if s.Protocol == "" {
+		return ProtocolTCP
+	}
+	return s.Protocol
 }
 
 func acceptLoop(ctx context.Context, l net.Listener, upstream string, conns *sync.WaitGroup, logger *slog.Logger) {
@@ -215,13 +299,14 @@ type multiFlag []string
 func (m *multiFlag) String() string     { return fmt.Sprint([]string(*m)) }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
-func parsePairs(raw []string) ([]Spec, error) {
+func parsePairsWithProtocol(raw []string, proto Protocol) ([]Spec, error) {
 	specs := make([]Spec, 0, len(raw))
 	for _, r := range raw {
 		spec, err := parsePair(r)
 		if err != nil {
 			return nil, err
 		}
+		spec.Protocol = proto
 		specs = append(specs, spec)
 	}
 	return specs, nil

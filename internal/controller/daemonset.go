@@ -104,12 +104,7 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.Daemo
 								corev1.ResourceMemory: resource.MustParse("128Mi"),
 							},
 						},
-						ReadinessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(svc.Spec.Ports[0].Port)},
-							},
-							PeriodSeconds: 5,
-						},
+						ReadinessProbe: readinessProbe(svc),
 					}},
 				},
 			},
@@ -129,8 +124,12 @@ func portsAndArgs(svc *corev1.Service) ([]corev1.ContainerPort, []string, error)
 	ports := make([]corev1.ContainerPort, 0, len(svc.Spec.Ports))
 	args := make([]string, 0, len(svc.Spec.Ports))
 	for _, p := range svc.Spec.Ports {
-		if p.Protocol != "" && p.Protocol != corev1.ProtocolTCP {
-			return nil, nil, fmt.Errorf("port %d: only TCP supported in Phase 1, got %s", p.Port, p.Protocol)
+		protocol := p.Protocol
+		if protocol == "" {
+			protocol = corev1.ProtocolTCP
+		}
+		if protocol != corev1.ProtocolTCP && protocol != corev1.ProtocolUDP {
+			return nil, nil, fmt.Errorf("port %d: unsupported protocol %s (only TCP and UDP)", p.Port, protocol)
 		}
 		target := p.TargetPort.String()
 		if target == "" || target == "0" {
@@ -140,16 +139,57 @@ func portsAndArgs(svc *corev1.Service) ([]corev1.ContainerPort, []string, error)
 			Name:          portName(p),
 			ContainerPort: p.Port,
 			HostPort:      p.Port,
-			Protocol:      corev1.ProtocolTCP,
+			Protocol:      protocol,
 		})
+		flag := upstreamFlag(protocol)
 		if v4ClusterIP != "" {
-			args = append(args, fmt.Sprintf("--upstream=0.0.0.0:%d=%s:%s", p.Port, v4ClusterIP, target))
+			args = append(args, fmt.Sprintf("--%s=0.0.0.0:%d=%s:%s", flag, p.Port, v4ClusterIP, target))
 		}
 		if v6ClusterIP != "" {
-			args = append(args, fmt.Sprintf("--upstream=[::]:%d=[%s]:%s", p.Port, v6ClusterIP, target))
+			args = append(args, fmt.Sprintf("--%s=[::]:%d=[%s]:%s", flag, p.Port, v6ClusterIP, target))
 		}
 	}
 	return ports, args, nil
+}
+
+// upstreamFlag picks the proxy CLI flag for a given Service port
+// protocol. TCP uses --upstream (the Phase 1 flag, retained for
+// compatibility); UDP uses --udp-upstream.
+func upstreamFlag(p corev1.Protocol) string {
+	if p == corev1.ProtocolUDP {
+		return "udp-upstream"
+	}
+	return "upstream"
+}
+
+// readinessProbe returns a TCPSocket probe scoped to the first TCP
+// port. UDP-only Services get no readiness probe — kubelet's only
+// built-in checks (TCP, HTTP, exec) don't fit a UDP listener, and a
+// false-positive ready signal is worse than no signal here.
+func readinessProbe(svc *corev1.Service) *corev1.Probe {
+	port := firstTCPPort(svc)
+	if port == 0 {
+		return nil
+	}
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
+		},
+		PeriodSeconds: 5,
+	}
+}
+
+// firstTCPPort returns the first TCP service port, or 0 if none.
+// Used to scope the readiness probe — TCP-only because the kubelet
+// probe is a TCP socket connect.
+func firstTCPPort(svc *corev1.Service) int32 {
+	for _, p := range svc.Spec.Ports {
+		proto := p.Protocol
+		if proto == "" || proto == corev1.ProtocolTCP {
+			return p.Port
+		}
+	}
+	return 0
 }
 
 // splitClusterIPs returns the IPv4 and IPv6 ClusterIPs for a Service.

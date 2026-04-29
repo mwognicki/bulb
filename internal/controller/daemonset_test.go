@@ -185,12 +185,68 @@ func TestBuildDaemonSet_NodePlacement_Invalid(t *testing.T) {
 	}
 }
 
-func TestBuildDaemonSet_RejectsNonTCP(t *testing.T) {
+func TestBuildDaemonSet_AcceptsUDP(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
-		s.Spec.Ports[0].Protocol = corev1.ProtocolUDP
+		s.Spec.Ports = []corev1.ServicePort{{
+			Name: "dns", Port: 5353, TargetPort: intstr.FromInt32(5353), Protocol: corev1.ProtocolUDP,
+		}}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("expected UDP service to build, got err=%v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	want := "--udp-upstream=0.0.0.0:5353=10.96.1.5:5353"
+	if !slices.Contains(args, want) {
+		t.Errorf("missing %q in %v", want, args)
+	}
+	for _, a := range args {
+		if a == "--upstream=0.0.0.0:5353=10.96.1.5:5353" {
+			t.Errorf("UDP port should not produce --upstream flag: %v", args)
+		}
+	}
+	cport := ds.Spec.Template.Spec.Containers[0].Ports[0]
+	if cport.Protocol != corev1.ProtocolUDP {
+		t.Errorf("ContainerPort.Protocol: got %s want UDP", cport.Protocol)
+	}
+	if ds.Spec.Template.Spec.Containers[0].ReadinessProbe != nil {
+		t.Errorf("UDP-only Service should have no readiness probe, got %+v", ds.Spec.Template.Spec.Containers[0].ReadinessProbe)
+	}
+}
+
+func TestBuildDaemonSet_MixedTCPAndUDP(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Spec.Ports = []corev1.ServicePort{
+			{Name: "https", Port: 8443, TargetPort: intstr.FromInt32(8443), Protocol: corev1.ProtocolTCP},
+			{Name: "dns", Port: 5353, TargetPort: intstr.FromInt32(5353), Protocol: corev1.ProtocolUDP},
+		}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	wants := []string{
+		"--upstream=0.0.0.0:8443=10.96.1.5:8443",
+		"--udp-upstream=0.0.0.0:5353=10.96.1.5:5353",
+	}
+	for _, w := range wants {
+		if !slices.Contains(args, w) {
+			t.Errorf("missing %q in %v", w, args)
+		}
+	}
+	probe := ds.Spec.Template.Spec.Containers[0].ReadinessProbe
+	if probe == nil || probe.TCPSocket == nil || probe.TCPSocket.Port.IntVal != 8443 {
+		t.Errorf("readiness probe should target the TCP port 8443, got %+v", probe)
+	}
+}
+
+func TestBuildDaemonSet_RejectsSCTP(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Spec.Ports[0].Protocol = corev1.ProtocolSCTP
 	})
 	if _, err := BuildDaemonSet(svc, "img", "bulb-system"); err == nil {
-		t.Fatal("expected error for UDP in Phase 1")
+		t.Fatal("expected error for SCTP")
 	}
 }
 

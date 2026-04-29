@@ -63,7 +63,7 @@ func TestServe_EndToEnd(t *testing.T) {
 
 	logger := slog.New(slog.DiscardHandler)
 	served := make(chan error, 1)
-	go func() { served <- Serve(ctx, specs, time.Second, logger) }()
+	go func() { served <- Serve(ctx, specs, ServeOptions{DrainTimeout: time.Second}, logger) }()
 
 	conn := dialUntilReady(t, listenAddr, time.Second)
 	t.Cleanup(func() { _ = conn.Close() })
@@ -102,7 +102,7 @@ func TestServe_DrainTimeoutExceeded(t *testing.T) {
 
 	logger := slog.New(slog.DiscardHandler)
 	served := make(chan error, 1)
-	go func() { served <- Serve(ctx, specs, 50*time.Millisecond, logger) }()
+	go func() { served <- Serve(ctx, specs, ServeOptions{DrainTimeout: 50 * time.Millisecond}, logger) }()
 
 	c := dialUntilReady(t, listenAddr, time.Second)
 	t.Cleanup(func() { _ = c.Close() })
@@ -131,7 +131,7 @@ func TestServe_BindFailure(t *testing.T) {
 	specs := []Spec{{Listen: occupier.Addr().String(), Upstream: "127.0.0.1:1"}}
 	logger := slog.New(slog.DiscardHandler)
 
-	err = Serve(context.Background(), specs, time.Second, logger)
+	err = Serve(context.Background(), specs, ServeOptions{DrainTimeout: time.Second}, logger)
 	if err == nil {
 		t.Fatal("expected bind failure, got nil")
 	}
