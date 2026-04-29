@@ -68,10 +68,7 @@ metadata:
     app.kubernetes.io/name: bulb
     app.kubernetes.io/component: firewall-agent
 ---
-# Namespace-scoped read on the node-ips ConfigMap (and any other config
-# we add later) plus full Lease control for leader election. Keeping
-# ConfigMap reads namespaced means a future user-supplied ConfigMap in
-# another namespace would be off-limits — that's intentional for now.
+# Namespace-scoped Lease control for leader election.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -81,9 +78,6 @@ metadata:
     app.kubernetes.io/name: bulb
     app.kubernetes.io/component: controller
 rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -164,4 +158,41 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: bulb-firewall-agent
+    namespace: bulb-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bulb-node-ip-labeler
+  namespace: bulb-system
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: node-ip-labeler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bulb-node-ip-labeler
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: node-ip-labeler
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bulb-node-ip-labeler
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: node-ip-labeler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bulb-node-ip-labeler
+subjects:
+  - kind: ServiceAccount
+    name: bulb-node-ip-labeler
     namespace: bulb-system

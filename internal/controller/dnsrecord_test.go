@@ -13,6 +13,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+func nodeWithIP(name, ipv4 string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name:        name,
+		Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": ipv4},
+	}}
+}
+
 func TestBuildDNSRecord_NilWhenNoAnnotation(t *testing.T) {
 	svc := mkSvc()
 	rec := BuildDNSRecord(svc, []string{"1.2.3.4"})
@@ -89,11 +96,8 @@ func TestApplyDNSRecord_CreatesRecord(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
 		s.Annotations = map[string]string{AnnotationDNSName: "api.example.com"}
 	})
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "bulb-system", Name: "node-ips"},
-		Data:       map[string]string{"a": "1.2.3.4", "b": "5.6.7.8"},
-	}
-	r, c := newReconciler(t, svc, cm)
+	nodes := []client.Object{nodeWithIP("a", "1.2.3.4"), nodeWithIP("b", "5.6.7.8")}
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
 
@@ -113,11 +117,8 @@ func TestApplyDNSRecord_DeletesRecordWhenAnnotationRemoved(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
 		s.Annotations = map[string]string{AnnotationDNSName: "api.example.com"}
 	})
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "bulb-system", Name: "node-ips"},
-		Data:       map[string]string{"a": "1.2.3.4"},
-	}
-	r, c := newReconciler(t, svc, cm)
+	nodes := []client.Object{nodeWithIP("a", "1.2.3.4")}
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
 
@@ -143,15 +144,12 @@ func TestApplyDNSRecord_DeletesRecordWhenAnnotationRemoved(t *testing.T) {
 	}
 }
 
-func TestApplyDNSRecord_UpdatesTargetsOnIPChange(t *testing.T) {
+func TestApplyDNSRecord_UpdatesTargetsOnNodeIPChange(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
 		s.Annotations = map[string]string{AnnotationDNSName: "api.example.com"}
 	})
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "bulb-system", Name: "node-ips"},
-		Data:       map[string]string{"a": "1.2.3.4"},
-	}
-	r, c := newReconciler(t, svc, cm)
+	nodes := []client.Object{nodeWithIP("a", "1.2.3.4")}
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
 
@@ -163,13 +161,13 @@ func TestApplyDNSRecord_UpdatesTargetsOnIPChange(t *testing.T) {
 		t.Fatalf("targets: got %v", rec.Spec.Targets)
 	}
 
-	var liveCM corev1.ConfigMap
-	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "node-ips"}, &liveCM); err != nil {
-		t.Fatalf("get configmap: %v", err)
+	var liveNode corev1.Node
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "a"}, &liveNode); err != nil {
+		t.Fatalf("get node: %v", err)
 	}
-	liveCM.Data["b"] = "5.6.7.8"
-	if err := c.Update(context.Background(), &liveCM); err != nil {
-		t.Fatalf("update configmap: %v", err)
+	liveNode.Annotations["bulb.toturi.tech/public-ipv4"] = "5.6.7.8"
+	if err := c.Update(context.Background(), &liveNode); err != nil {
+		t.Fatalf("update node: %v", err)
 	}
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
@@ -177,18 +175,15 @@ func TestApplyDNSRecord_UpdatesTargetsOnIPChange(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo"}, &rec); err != nil {
 		t.Fatalf("get dnsrecord after update: %v", err)
 	}
-	if !sameStringSet(rec.Spec.Targets, []string{"1.2.3.4", "5.6.7.8"}) {
+	if !sameStringSet(rec.Spec.Targets, []string{"5.6.7.8"}) {
 		t.Fatalf("targets after IP change: got %v", rec.Spec.Targets)
 	}
 }
 
 func TestApplyDNSRecord_NoRecordWithoutAnnotation(t *testing.T) {
 	svc := mkSvc()
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "bulb-system", Name: "node-ips"},
-		Data:       map[string]string{"a": "1.2.3.4"},
-	}
-	r, c := newReconciler(t, svc, cm)
+	nodes := []client.Object{nodeWithIP("a", "1.2.3.4")}
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
 
@@ -205,11 +200,8 @@ func TestCleanupDNSRecordsByName(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
 		s.Annotations = map[string]string{AnnotationDNSName: "api.example.com"}
 	})
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "bulb-system", Name: "node-ips"},
-		Data:       map[string]string{"a": "1.2.3.4"},
-	}
-	r, c := newReconciler(t, svc, cm)
+	nodes := []client.Object{nodeWithIP("a", "1.2.3.4")}
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
 
@@ -228,11 +220,8 @@ func TestReconcile_CleansUpDNSRecordOnServiceDelete(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
 		s.Annotations = map[string]string{AnnotationDNSName: "api.example.com"}
 	})
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "bulb-system", Name: "node-ips"},
-		Data:       map[string]string{"a": "1.2.3.4"},
-	}
-	r, c := newReconciler(t, svc, cm)
+	nodes := []client.Object{nodeWithIP("a", "1.2.3.4")}
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
 
@@ -263,11 +252,8 @@ func TestReconcile_CleansUpDNSRecordOnTypeChange(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
 		s.Annotations = map[string]string{AnnotationDNSName: "api.example.com"}
 	})
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "bulb-system", Name: "node-ips"},
-		Data:       map[string]string{"a": "1.2.3.4"},
-	}
-	r, c := newReconciler(t, svc, cm)
+	nodes := []client.Object{nodeWithIP("a", "1.2.3.4")}
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
 
@@ -297,11 +283,8 @@ func TestReconcile_DNSRecordWithMultiplePorts(t *testing.T) {
 			{Name: "http", Port: 8080, TargetPort: intstr.FromInt32(8080), Protocol: corev1.ProtocolTCP},
 		}
 	})
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "bulb-system", Name: "node-ips"},
-		Data:       map[string]string{"a": "1.2.3.4"},
-	}
-	r, c := newReconciler(t, svc, cm)
+	nodes := []client.Object{nodeWithIP("a", "1.2.3.4")}
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
 

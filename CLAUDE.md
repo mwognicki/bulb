@@ -67,7 +67,8 @@ Don't build phase N+1 until N is in production.
     2. Stale node cleanup: the controller already has `lbports/status` RBAC — on each reconcile, diff `appliedNodes` against current cluster nodes and prune entries belonging to nodes that no longer exist or are unschedulable. Prevents orphaned entries when a node is removed while its agent is down.
     3. `FirewallPortOpened` / `FirewallPortClosed` events on the owning Service: the controller should watch LBPort status changes and emit a Kubernetes Event when `appliedNodes` converges to match `spec.nodes` (all agents applied) or when it stalls (partial apply after a timeout). This completes the observability requirement at CLAUDE.md:115.
 - **Phase 3 — DNS dry-run.** Controller computes and surfaces the desired DNS configuration per Service (which node IPs should be in the A record, based on `bulb.toturi.tech/dns-name` annotation). Output via structured log, Service status/conditions, and/or a dry-run `DNSRecord` CR — but **no dns-agent, no health checks, no provider integration yet**. Rationale: target clusters are small, static VPS nodes; IP churn is rare. The operator can use the output to configure DNS manually until automated publishing is justified.
-- **Phase 4 — Polish.** UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, per-node IP discovery (drop static ConfigMap; node annotation written by a tiny `node-ip-labeler` DaemonSet), multi-arch images.
+- **Phase 4 — Polish.** UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, multi-arch images.
+  - Per-node IP discovery is done: `node-ip-labeler` DaemonSet discovers public IPs from the default-route interface and annotates Nodes with `bulb.toturi.tech/public-ipv4` and `bulb.toturi.tech/public-ipv6`. The controller reads node annotations instead of the static ConfigMap. The static `node-ips` ConfigMap is deprecated.
 - **Phase 5 — DNS publishing (optional).** `dns-agent` Deployment + Cloudflare provider. Active TCP health checks per node:port. Failed nodes withdrawn from DNS. Acceptance: kill one node's proxy pod → its IP removed from DNS A record set within 30s.
 - **Phase 6 (far future, optional).** Replace userspace TCP splice with SO_REUSEPORT + eBPF sockmap or nftables DNAT + conntrack. More DNS providers. kubectl plugin.
 
@@ -155,7 +156,7 @@ All `v1alpha1` until 1.0, cluster-scoped, status subresource enabled, kubectl pr
 - Operator uninstall: GC chain via OwnerReferences by default; `bulb.toturi.tech/keep-on-uninstall=true` opts out.
 - Two Services on same hostPort: controller refuses second, sets `PortConflict=True` condition.
 - LBPort conflict: `LBPort.spec.owner` (controller name); refuse on conflict. No multi-controller support in v1.
-- Node public IP discovery: ConfigMap (Phase 1) → annotation written by `node-ip-labeler` DaemonSet (Phase 4).
+- Node public IP discovery: ~~ConfigMap (Phase 1)~~ → node annotations written by `node-ip-labeler` DaemonSet (Phase 4, done).
 
 ## Out of scope
 

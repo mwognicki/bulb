@@ -32,9 +32,8 @@ type ServiceReconciler struct {
 	Scheme *runtime.Scheme
 	record.EventRecorder
 
-	Namespace        string
-	Image            string
-	NodeIPsConfigMap string
+	Namespace string
+	Image     string
 }
 
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
@@ -83,9 +82,9 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	r.emitLBPortEvents(ctx, &svc)
 
-	ips, err := r.publicIPs(ctx)
+	ips, err := r.nodePublicIPs(ctx)
 	if err != nil {
-		logger.Error(err, "read node-ips configmap; status will not be updated this round")
+		logger.Error(err, "read node public IPs; status will not be updated this round")
 		return ctrl.Result{}, err
 	}
 
@@ -180,27 +179,30 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 	return ctrl.Result{}, nil
 }
 
-// publicIPs reads the node-ips ConfigMap and returns a sorted list of
-// public IPv4 addresses, one per node entry.
-//
-// Phase 4 will replace this with a node-annotation read (the
-// node-ip-labeler DaemonSet will populate them).
-func (r *ServiceReconciler) publicIPs(ctx context.Context) ([]string, error) {
-	if r.NodeIPsConfigMap == "" {
-		return nil, nil
+// nodePublicIPs lists all schedulable nodes and collects their annotated
+// public IPs (bulb.toturi.tech/public-ipv4, bulb.toturi.tech/public-ipv6).
+// Returns a sorted, deduplicated list.
+func (r *ServiceReconciler) nodePublicIPs(ctx context.Context) ([]string, error) {
+	var nodes corev1.NodeList
+	if err := r.List(ctx, &nodes); err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
 	}
-	var cm corev1.ConfigMap
-	key := types.NamespacedName{Namespace: r.Namespace, Name: r.NodeIPsConfigMap}
-	if err := r.Get(ctx, key, &cm); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
+	seen := make(map[string]struct{})
+	ips := make([]string, 0, len(nodes.Items))
+	for _, node := range nodes.Items {
+		if node.Spec.Unschedulable {
+			continue
 		}
-		return nil, fmt.Errorf("get node-ips configmap: %w", err)
-	}
-	ips := make([]string, 0, len(cm.Data))
-	for _, v := range cm.Data {
-		if v != "" {
-			ips = append(ips, v)
+		for _, ann := range []string{
+			"bulb.toturi.tech/public-ipv4",
+			"bulb.toturi.tech/public-ipv6",
+		} {
+			if ip := node.Annotations[ann]; ip != "" {
+				if _, ok := seen[ip]; !ok {
+					seen[ip] = struct{}{}
+					ips = append(ips, ip)
+				}
+			}
 		}
 	}
 	sort.Strings(ips)
@@ -239,6 +241,10 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&bulbv1alpha1.LBPort{},
 			handler.EnqueueRequestsFromMapFunc(lbPortToService),
 		).
+		Watches(
+			&corev1.Node{},
+			handler.EnqueueRequestsFromMapFunc(nodeToAllServices(r)),
+		).
 		Complete(r)
 }
 
@@ -259,5 +265,26 @@ func servicePredicate() predicate.Predicate {
 		},
 		DeleteFunc:  func(e event.DeleteEvent) bool { return match(e.Object) },
 		GenericFunc: func(e event.GenericEvent) bool { return match(e.Object) },
+	}
+}
+
+func nodeToAllServices(r client.Reader) func(context.Context, client.Object) []ctrl.Request {
+	return func(ctx context.Context, _ client.Object) []ctrl.Request {
+		var svcs corev1.ServiceList
+		if err := r.List(ctx, &svcs); err != nil {
+			return nil
+		}
+		var reqs []ctrl.Request
+		for _, svc := range svcs.Items {
+			if ServiceMatches(&svc) {
+				reqs = append(reqs, ctrl.Request{
+					NamespacedName: types.NamespacedName{
+						Namespace: svc.Namespace,
+						Name:      svc.Name,
+					},
+				})
+			}
+		}
+		return reqs
 	}
 }

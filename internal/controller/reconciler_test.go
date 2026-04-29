@@ -59,11 +59,10 @@ func newReconciler(t *testing.T, objs ...client.Object) (*ServiceReconciler, cli
 		WithStatusSubresource(&corev1.Service{}, &bulbv1alpha1.LBPort{}, &bulbv1alpha1.DNSRecord{}).
 		Build()
 	return &ServiceReconciler{
-		Client:           c,
-		Scheme:           scheme,
-		Namespace:        "bulb-system",
-		Image:            "ghcr.io/mwognicki/bulb:test",
-		NodeIPsConfigMap: "node-ips",
+		Client:    c,
+		Scheme:    scheme,
+		Namespace: "bulb-system",
+		Image:     "ghcr.io/mwognicki/bulb:test",
 	}, c
 }
 
@@ -77,12 +76,11 @@ func newReconcilerWithRecorder(t *testing.T, objs ...client.Object) (*ServiceRec
 		Build()
 	rec := record.NewFakeRecorder(16)
 	return &ServiceReconciler{
-		Client:           c,
-		Scheme:           scheme,
-		EventRecorder:    rec,
-		Namespace:        "bulb-system",
-		Image:            "ghcr.io/mwognicki/bulb:test",
-		NodeIPsConfigMap: "node-ips",
+		Client:        c,
+		Scheme:        scheme,
+		EventRecorder: rec,
+		Namespace:     "bulb-system",
+		Image:         "ghcr.io/mwognicki/bulb:test",
 	}, rec, c
 }
 
@@ -231,17 +229,23 @@ func TestReconcile_IgnoresClusterIPType(t *testing.T) {
 	}
 }
 
-func TestReconcile_PopulatesStatusIngressFromConfigMap(t *testing.T) {
+func TestReconcile_PopulatesStatusIngressFromNodeAnnotations(t *testing.T) {
 	svc := newSvc(nil)
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "bulb-system", Name: "node-ips"},
-		Data: map[string]string{
-			"node-a": "203.0.113.10",
-			"node-b": "203.0.113.11",
-			"node-c": "203.0.113.12",
-		},
+	nodes := []client.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name: "node-a",
+			Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.10"},
+		}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name: "node-b",
+			Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.11"},
+		}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name: "node-c",
+			Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.12"},
+		}},
 	}
-	r, c := newReconciler(t, svc, cm)
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
 
 	reconcileOnce(t, r, svc.Namespace, svc.Name)
 
@@ -260,7 +264,7 @@ func TestReconcile_PopulatesStatusIngressFromConfigMap(t *testing.T) {
 	}
 }
 
-func TestReconcile_NoConfigMapMeansNoIngress(t *testing.T) {
+func TestReconcile_NoAnnotationsMeansNoIngress(t *testing.T) {
 	svc := newSvc(nil)
 	r, c := newReconciler(t, svc)
 
@@ -271,7 +275,35 @@ func TestReconcile_NoConfigMapMeansNoIngress(t *testing.T) {
 		t.Fatalf("get service: %v", err)
 	}
 	if len(got.Status.LoadBalancer.Ingress) != 0 {
-		t.Fatalf("expected empty ingress without ConfigMap, got %+v", got.Status.LoadBalancer.Ingress)
+		t.Fatalf("expected empty ingress without node annotations, got %+v", got.Status.LoadBalancer.Ingress)
+	}
+}
+
+func TestReconcile_SkipsUnschedulableNodesForIPs(t *testing.T) {
+	svc := newSvc(nil)
+	nodes := []client.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name: "node-a",
+			Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.10"},
+		}},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-b",
+				Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.11"},
+			},
+			Spec: corev1.NodeSpec{Unschedulable: true},
+		},
+	}
+	r, c := newReconciler(t, append([]client.Object{svc}, nodes...)...)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var got corev1.Service
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &got); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if len(got.Status.LoadBalancer.Ingress) != 1 || got.Status.LoadBalancer.Ingress[0].IP != "203.0.113.10" {
+		t.Fatalf("expected only schedulable node IP, got %+v", got.Status.LoadBalancer.Ingress)
 	}
 }
 

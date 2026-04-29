@@ -47,7 +47,6 @@ spec:
             - controller
             - --namespace=bulb-system
             - --image=$(BULB_IMAGE)
-            - --node-ips-configmap=node-ips
             - --leader-elect=true
             - --metrics-bind-address=:9100
             - --health-probe-bind-address=:8081

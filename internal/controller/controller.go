@@ -26,7 +26,6 @@ func Run(args []string) error {
 	fs := flag.NewFlagSet("controller", flag.ContinueOnError)
 	namespace := fs.String("namespace", "bulb-system", "namespace where bulb workloads are created")
 	image := fs.String("image", "", "bulb container image used by per-Service proxy DaemonSets (required)")
-	nodeIPsCM := fs.String("node-ips-configmap", "node-ips", "ConfigMap (in --namespace) mapping node-name → public IPv4")
 	metricsAddr := fs.String("metrics-bind-address", ":9100", "address the metrics endpoint binds to")
 	probeAddr := fs.String("health-probe-bind-address", ":8081", "address the readiness/liveness probe binds to")
 	leaderID := fs.String("leader-election-id", "bulb-controller", "lease name used for leader election")
@@ -57,12 +56,11 @@ func Run(args []string) error {
 	}
 
 	r := &ServiceReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		EventRecorder:    mgr.GetEventRecorderFor("bulb-controller"),
-		Namespace:        *namespace,
-		Image:            *image,
-		NodeIPsConfigMap: *nodeIPsCM,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		EventRecorder: mgr.GetEventRecorderFor("bulb-controller"),
+		Namespace:     *namespace,
+		Image:         *image,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup reconciler: %w", err)
