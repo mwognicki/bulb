@@ -20,6 +20,7 @@ const (
 	AnnotationAllowPrivilegedPort   = "bulb.toturi.tech/allow-privileged-port"
 	AnnotationProxyProtocol         = "bulb.toturi.tech/proxy-protocol"
 	AnnotationExternalTrafficPolicy = "bulb.toturi.tech/external-traffic-policy"
+	AnnotationKeepOnUninstall       = "bulb.toturi.tech/keep-on-uninstall"
 
 	labelManagedBy   = "app.kubernetes.io/managed-by"
 	labelManagedByV  = "bulb"
@@ -86,12 +87,14 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string, endpointSets .
 	}
 
 	labels := serviceLabels(svc)
+	annotations := daemonSetAnnotations(svc)
 
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      DaemonSetName(svc),
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        DaemonSetName(svc),
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
@@ -127,6 +130,13 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string, endpointSets .
 		},
 	}
 	return ds, nil
+}
+
+func daemonSetAnnotations(svc *corev1.Service) map[string]string {
+	if svc.Annotations[AnnotationKeepOnUninstall] != "true" {
+		return nil
+	}
+	return map[string]string{AnnotationKeepOnUninstall: "true"}
 }
 
 // DaemonSetName returns the deterministic per-Service DS name.

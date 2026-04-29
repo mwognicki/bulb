@@ -55,13 +55,13 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Service is gone; clean up the DS we created for it. Cross-namespace
 			// OwnerReferences are disallowed for namespaced kinds, so we can't
 			// rely on Kubernetes GC.
-			return r.cleanupByName(ctx, req.Namespace, req.Name)
+			return r.cleanupByName(ctx, req.Namespace, req.Name, cleanupHonorKeep)
 		}
 		return ctrl.Result{}, fmt.Errorf("get service: %w", err)
 	}
 
 	if !ServiceMatches(&svc) {
-		return r.cleanupByName(ctx, svc.Namespace, svc.Name)
+		return r.cleanupByName(ctx, svc.Namespace, svc.Name, cleanupModeForService(&svc))
 	}
 
 	endpoints, err := r.serviceEndpoints(ctx, &svc)
@@ -79,7 +79,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update no-ready-endpoints condition: %w", err)
 		}
-		return r.cleanupByName(ctx, svc.Namespace, svc.Name)
+		return r.cleanupByName(ctx, svc.Namespace, svc.Name, cleanupForceDelete)
 	}
 
 	lbports, err := r.BuildLBPorts(ctx, &svc)
@@ -101,7 +101,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update port conflict condition: %w", err)
 		}
-		return r.cleanupByName(ctx, svc.Namespace, svc.Name)
+		return r.cleanupByName(ctx, svc.Namespace, svc.Name, cleanupForceDelete)
 	}
 
 	desired, err := BuildDaemonSet(&svc, r.Image, r.Namespace, endpoints)
@@ -176,12 +176,14 @@ func (r *ServiceReconciler) applyDaemonSet(ctx context.Context, desired *appsv1.
 	}
 
 	if equality.Semantic.DeepEqual(existing.Spec, desired.Spec) &&
-		equality.Semantic.DeepEqual(existing.Labels, desired.Labels) {
+		equality.Semantic.DeepEqual(existing.Labels, desired.Labels) &&
+		equality.Semantic.DeepEqual(existing.Annotations, desired.Annotations) {
 		return nil
 	}
 
 	existing.Spec = desired.Spec
 	existing.Labels = desired.Labels
+	existing.Annotations = desired.Annotations
 	if err := r.Update(ctx, &existing); err != nil {
 		return fmt.Errorf("update daemonset: %w", err)
 	}
@@ -199,7 +201,7 @@ func (r *ServiceReconciler) markInvalidService(ctx context.Context, svc *corev1.
 	); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update invalid service condition: %w", err)
 	}
-	return r.cleanupByName(ctx, svc.Namespace, svc.Name)
+	return r.cleanupByName(ctx, svc.Namespace, svc.Name, cleanupForceDelete)
 }
 
 func (r *ServiceReconciler) eventf(svc *corev1.Service, eventType, reason, message string) {
@@ -213,7 +215,21 @@ func (r *ServiceReconciler) eventf(svc *corev1.Service, eventType, reason, messa
 // produced for (svcNamespace, svcName). The labels we put on the DS
 // pin it to that Service, so we can confirm we own the object before
 // deleting.
-func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svcName string) (ctrl.Result, error) {
+type cleanupMode int
+
+const (
+	cleanupForceDelete cleanupMode = iota
+	cleanupHonorKeep
+)
+
+func cleanupModeForService(svc *corev1.Service) cleanupMode {
+	if svc.Annotations[AnnotationKeepOnUninstall] == "true" {
+		return cleanupHonorKeep
+	}
+	return cleanupForceDelete
+}
+
+func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svcName string, mode cleanupMode) (ctrl.Result, error) {
 	dsName := fmt.Sprintf("bulb-%s-%s", svcNamespace, svcName)
 	var ds appsv1.DaemonSet
 	err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: dsName}, &ds)
@@ -233,8 +249,10 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 		// Name collision with something we don't own. Refuse to delete.
 		return ctrl.Result{}, nil
 	}
-	if err := r.Delete(ctx, &ds); err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("delete daemonset: %w", err)
+	if mode == cleanupForceDelete || ds.Annotations[AnnotationKeepOnUninstall] != "true" {
+		if err := r.Delete(ctx, &ds); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("delete daemonset: %w", err)
+		}
 	}
 	if err := r.cleanupLBPorts(ctx, svcNamespace, svcName); err != nil {
 		return ctrl.Result{}, err

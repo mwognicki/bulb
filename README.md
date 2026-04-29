@@ -71,7 +71,7 @@ Per-Service knobs (all optional):
 | `bulb.toturi.tech/nodes` | Node selector restricting which nodes serve the Service |
 | `bulb.toturi.tech/dns-name` | FQDN for dry-run `DNSRecord` output |
 | `bulb.toturi.tech/proxy-protocol` | `v1` or `v2` — wrap upstream connections in PROXY protocol |
-| `bulb.toturi.tech/keep-on-uninstall` | Planned, not yet implemented: `"true"` should leave the proxy DaemonSet running if bulb is uninstalled |
+| `bulb.toturi.tech/keep-on-uninstall` | `"true"` leaves the proxy DaemonSet running when the Service is deleted or moved away from bulb ownership; conflict/invalid cleanup still removes stale proxies |
 | `bulb.toturi.tech/allow-privileged-port` | `"true"` — required to claim a port `< 1024` |
 
 Example:
@@ -227,8 +227,6 @@ the project should tighten the operator contract that Helm would package:
 
 - Update docs whenever behavior changes; remove stale Phase 1/static ConfigMap language.
 - Add custom controller/proxy metrics for reconcile outcomes, latency, active connections, bytes, and upstream dial errors.
-- Either implement `bulb.toturi.tech/keep-on-uninstall` or remove it from the documented annotation contract.
-- Decide whether Local endpoint routing should stay on core `Endpoints` or move to EndpointSlices, then align RBAC and docs.
 - Document and automate multi-arch image publishing.
 
 ## Roadmap
@@ -240,7 +238,7 @@ bulb has been built as incremental deployable slices. Current completeness:
 | 1. Klipper-clone MVP | Done | Controller creates per-Service proxy DaemonSets; TCP forwarding works; LoadBalancer ingress is populated from Node annotations rather than the original static ConfigMap design. |
 | 2. Firewall agent | Mostly done | `LBPort` CRD and firewall-agent exist with firewalld, iptables, nftables, dry-run mode, validation, status, events, cleanup, and metrics. Controller-side Service/LBPort conflict detection now surfaces `PortConflict=True`; remaining work is mostly broader health/metrics contract polish. |
 | 3. DNS dry-run | Done | Controller emits `DNSRecord` CRs that describe desired records. Provider publishing is intentionally deferred. |
-| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, proxy health probes, and multi-arch-capable Docker builds are present. Remaining polish is metrics, annotation truthfulness, Endpoint API choice, and release automation. |
+| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, proxy health probes, `keep-on-uninstall`, and multi-arch-capable Docker builds are present. Local endpoint routing intentionally uses core `Endpoints`, not EndpointSlices. Remaining polish is metrics and release automation. |
 | 5. Packaging and contract hardening | Not started | Next practical focus: controller/proxy metrics, release automation, then Helm. |
 
 ## Building

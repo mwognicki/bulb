@@ -200,6 +200,32 @@ func TestReconcile_CleansUpOnServiceDelete(t *testing.T) {
 	}
 }
 
+func TestReconcile_KeepOnUninstallLeavesDaemonSetOnServiceDelete(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationKeepOnUninstall: "true"}
+	r, c := newReconciler(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+	if err := c.Delete(context.Background(), svc); err != nil {
+		t.Fatalf("delete service: %v", err)
+	}
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var ds appsv1.DaemonSet
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds); err != nil {
+		t.Fatalf("expected DaemonSet to be kept after Service deletion: %v", err)
+	}
+	if ds.Annotations[AnnotationKeepOnUninstall] != "true" {
+		t.Fatalf("expected kept DaemonSet to carry keep annotation, got %+v", ds.Annotations)
+	}
+
+	var lbport bulbv1alpha1.LBPort
+	err := c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected LBPort cleanup even when DaemonSet is kept, got err=%v", err)
+	}
+}
+
 func TestReconcile_CreatesDaemonSetForEmptyClass(t *testing.T) {
 	svc := newSvc(nil)
 	r, c := newReconciler(t, svc)
@@ -372,6 +398,30 @@ func TestReconcile_CleansUpOnTypeChange(t *testing.T) {
 	err = c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected LBPort to be cleaned up, got err=%v", err)
+	}
+}
+
+func TestReconcile_KeepOnUninstallLeavesDaemonSetOnTypeChange(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationKeepOnUninstall: "true"}
+	r, c := newReconciler(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var live corev1.Service
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &live); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	live.Spec.Type = corev1.ServiceTypeClusterIP
+	if err := c.Update(context.Background(), &live); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var ds appsv1.DaemonSet
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds); err != nil {
+		t.Fatalf("expected DaemonSet to be kept after type change: %v", err)
 	}
 }
 
@@ -576,6 +626,31 @@ func TestReconcile_LocalPolicyWithoutReadyEndpointsSetsCondition(t *testing.T) {
 	events := drainEvents(rec)
 	if !hasEventWith(events, "NoReadyEndpoints") {
 		t.Fatalf("expected NoReadyEndpoints event, got %v", events)
+	}
+}
+
+func TestReconcile_KeepOnUninstallDoesNotKeepInvalidServiceDaemonSet(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationKeepOnUninstall: "true"}
+	r, c := newReconciler(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var live corev1.Service
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &live); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	live.Annotations[AnnotationExternalTrafficPolicy] = "Local"
+	if err := c.Update(context.Background(), &live); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var ds appsv1.DaemonSet
+	err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected forced cleanup for invalid/no-ready Service despite keep-on-uninstall, got err=%v", err)
 	}
 }
 

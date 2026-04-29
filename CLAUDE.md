@@ -13,8 +13,8 @@ protocol, and `externalTrafficPolicy: Local` endpoint routing.
 Before adding Helm or optional DNS publishing, tighten the operational
 contract described below. Conflict handling and Service status
 conditions/events and proxy health checks are now present;
-controller/proxy metrics, annotation truthfulness, release automation,
-and documentation must continue to match the code.
+controller/proxy metrics, release automation, and documentation must
+continue to match the code.
 
 ## What bulb is
 
@@ -95,7 +95,7 @@ Don't build phase N+1 until N is in production.
   - `bulb.toturi.tech/nodes: <selector>` (default: all schedulable)
   - `bulb.toturi.tech/dns-name: api.example.com` (opt into DNS)
   - `bulb.toturi.tech/proxy-protocol: v1|v2`
-  - `bulb.toturi.tech/keep-on-uninstall: "true"` (planned; currently documented but not implemented)
+  - `bulb.toturi.tech/keep-on-uninstall: "true"` (keep the proxy DaemonSet on Service delete or type/class change; forced cleanup still applies for invalid/conflicting Services)
   - `bulb.toturi.tech/allow-privileged-port: "true"` (required to open ports < 1024)
 - On Service delete or type change, GC the DaemonSet, LBPort CRs, DNSRecord CRs.
 
@@ -110,14 +110,7 @@ freeze the current rough edges:
 2. **Metrics.** Add custom controller/proxy metrics beyond the default
    controller-runtime metrics: reconcile counts/errors/latency,
    per-Service active connections, bytes, and upstream dial errors.
-3. **Annotation truthfulness.** Either implement
-   `bulb.toturi.tech/keep-on-uninstall` or remove it from the public
-   contract. Today it is documented but not wired into behavior.
-4. **Endpoints API decision.** The Local policy implementation currently
-   uses core `Endpoints`; either move to EndpointSlices or update the
-   security/RBAC documentation to bless `Endpoints` for this small-cluster
-   design.
-5. **Release path.** Document and automate multi-arch image publishing
+3. **Release path.** Document and automate multi-arch image publishing
    before Helm references versioned images as an install path.
 
 ### Proxy dataplane
@@ -167,7 +160,7 @@ Concrete implications:
 
 ## Security
 
-- Least-privilege RBAC. Controller: services, endpoints, nodes, own CRDs, DaemonSets in `bulb-system` only. EndpointSlices are still a possible future refinement, but the current Local policy implementation reads core `Endpoints`. Proxy: no API access, no hostNetwork, drop all caps. firewall-agent: hostNetwork + privileged required (firewalld D-Bus); reads CRs only. dns-agent (Phase 5): no host access; reads CRs + Secret; egress to provider API only.
+- Least-privilege RBAC. Controller: services, core `Endpoints`, nodes, own CRDs, DaemonSets in `bulb-system` only. Local endpoint routing intentionally stays on core `Endpoints`; do not introduce EndpointSlices for this small-cluster design. Proxy: no API access, no hostNetwork, drop all caps. firewall-agent: hostNetwork + privileged required (firewalld D-Bus); reads CRs only. dns-agent (Phase 5): no host access; reads CRs + Secret; egress to provider API only.
 - No `panic` outside of `init`. Errors wrapped with context.
 - Image: distroless (`gcr.io/distroless/static`). amd64 minimum, arm64 nice-to-have.
 
@@ -186,7 +179,7 @@ All `v1alpha1` until 1.0, cluster-scoped, status subresource enabled, kubectl pr
 - Language: **Go** (controller-runtime ecosystem). Aligns with Klipper-LB.
 - Single binary, subcommand-dispatched.
 - Leader election: **yes**, even with 1 replica (so rolling updates don't double-reconcile). Use client-go leases.
-- Operator uninstall: explicit cleanup is implemented for Service delete/type change. `bulb.toturi.tech/keep-on-uninstall=true` is documented as planned, but not implemented yet.
+- Operator uninstall: explicit cleanup is implemented for Service delete/type change. `bulb.toturi.tech/keep-on-uninstall=true` keeps the proxy DaemonSet but still lets bulb clean LBPort/DNSRecord objects; invalid/conflicting Services force proxy cleanup so stale traffic does not keep serving bad state.
 - Two Services on same hostPort: controller refuses second, sets `PortConflict=True` condition.
 - LBPort conflict: `LBPort.spec.owner` (controller name); refuse on conflict. No multi-controller support in v1.
 - Node public IP discovery: ~~ConfigMap (Phase 1)~~ → node annotations written by `node-ip-labeler` DaemonSet (Phase 4, done).

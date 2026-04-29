@@ -113,6 +113,28 @@ func TestBuildDaemonSet_PrivilegedPort(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_KeepOnUninstallAnnotation(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationKeepOnUninstall: "true"}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ds.Annotations[AnnotationKeepOnUninstall] != "true" {
+		t.Fatalf("expected keep-on-uninstall annotation on DaemonSet, got %+v", ds.Annotations)
+	}
+
+	noKeep := mkSvc()
+	ds, err = BuildDaemonSet(noKeep, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := ds.Annotations[AnnotationKeepOnUninstall]; ok {
+		t.Fatalf("unexpected keep-on-uninstall annotation on DaemonSet: %+v", ds.Annotations)
+	}
+}
+
 func TestBuildDaemonSet_NodePlacement_Equality(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
 		s.Annotations = map[string]string{AnnotationNodes: "role=edge,zone=eu-central"}
