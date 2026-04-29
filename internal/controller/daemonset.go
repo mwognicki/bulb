@@ -16,6 +16,7 @@ import (
 const (
 	AnnotationNodes               = "bulb.toturi.tech/nodes"
 	AnnotationAllowPrivilegedPort = "bulb.toturi.tech/allow-privileged-port"
+	AnnotationProxyProtocol      = "bulb.toturi.tech/proxy-protocol"
 
 	labelManagedBy   = "app.kubernetes.io/managed-by"
 	labelManagedByV  = "bulb"
@@ -60,7 +61,8 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.Daemo
 		}
 	}
 
-	ports, args, err := portsAndArgs(svc)
+	proxyProtocol := svc.Annotations[AnnotationProxyProtocol]
+	ports, args, err := portsAndArgs(svc, proxyProtocol)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +120,7 @@ func DaemonSetName(svc *corev1.Service) string {
 	return fmt.Sprintf("bulb-%s-%s", svc.Namespace, svc.Name)
 }
 
-func portsAndArgs(svc *corev1.Service) ([]corev1.ContainerPort, []string, error) {
+func portsAndArgs(svc *corev1.Service, proxyProtocol string) ([]corev1.ContainerPort, []string, error) {
 	v4ClusterIP, v6ClusterIP := splitClusterIPs(svc)
 
 	ports := make([]corev1.ContainerPort, 0, len(svc.Spec.Ports))
@@ -148,6 +150,9 @@ func portsAndArgs(svc *corev1.Service) ([]corev1.ContainerPort, []string, error)
 		if v6ClusterIP != "" {
 			args = append(args, fmt.Sprintf("--%s=[::]:%d=[%s]:%s", flag, p.Port, v6ClusterIP, target))
 		}
+	}
+	if proxyProtocol != "" {
+		args = append(args, "--proxy-protocol="+proxyProtocol)
 	}
 	return ports, args, nil
 }
