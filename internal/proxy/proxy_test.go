@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -168,6 +169,163 @@ func TestServe_BindFailure(t *testing.T) {
 	}
 }
 
+func TestServe_HealthEndpointsReadyWhenTCPUpstreamReachable(t *testing.T) {
+	requireTCPListenSupport(t)
+
+	upstream := startEchoServer(t)
+	listenAddr := freeAddr(t)
+	healthAddr := freeAddr(t)
+	specs := []Spec{{Listen: listenAddr, Upstream: upstream}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	logger := slog.New(slog.DiscardHandler)
+	served := make(chan error, 1)
+	go func() {
+		served <- Serve(ctx, specs, ServeOptions{
+			DrainTimeout:       time.Second,
+			HealthBindAddress:  healthAddr,
+			HealthCheckTimeout: 100 * time.Millisecond,
+		}, logger)
+	}()
+
+	if got := getHTTPStatusUntilReady(t, "http://"+healthAddr+"/healthz", time.Second); got != http.StatusOK {
+		t.Fatalf("/healthz: got %d want 200", got)
+	}
+	if got := getHTTPStatusUntilReady(t, "http://"+healthAddr+"/readyz", time.Second); got != http.StatusOK {
+		t.Fatalf("/readyz: got %d want 200", got)
+	}
+	body := getHTTPBodyUntilReady(t, "http://"+healthAddr+"/metrics", time.Second)
+	if !strings.Contains(body, "bulb_proxy_tcp_active_connections") {
+		t.Fatalf("/metrics missing proxy metrics, got %q", body)
+	}
+
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return after cancel")
+	}
+}
+
+func TestServe_ReadyzFailsWhenTCPUpstreamUnreachable(t *testing.T) {
+	requireTCPListenSupport(t)
+
+	listenAddr := freeAddr(t)
+	healthAddr := freeAddr(t)
+	specs := []Spec{{Listen: listenAddr, Upstream: "127.0.0.1:1"}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	logger := slog.New(slog.DiscardHandler)
+	served := make(chan error, 1)
+	go func() {
+		served <- Serve(ctx, specs, ServeOptions{
+			DrainTimeout:       time.Second,
+			HealthBindAddress:  healthAddr,
+			HealthCheckTimeout: 50 * time.Millisecond,
+		}, logger)
+	}()
+
+	if got := getHTTPStatusUntilReady(t, "http://"+healthAddr+"/healthz", time.Second); got != http.StatusOK {
+		t.Fatalf("/healthz: got %d want 200", got)
+	}
+	if got := getHTTPStatusUntilReady(t, "http://"+healthAddr+"/readyz", time.Second); got != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz: got %d want 503", got)
+	}
+
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return after cancel")
+	}
+}
+
+func TestServe_ReadyzUsesLocalEndpointWhenConfigured(t *testing.T) {
+	requireTCPListenSupport(t)
+
+	endpoint := startEchoServer(t)
+	listenAddr := freeAddr(t)
+	healthAddr := freeAddr(t)
+	specs := []Spec{{
+		Listen:    listenAddr,
+		Upstream:  "127.0.0.1:1",
+		Endpoints: []string{endpoint},
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	logger := slog.New(slog.DiscardHandler)
+	served := make(chan error, 1)
+	go func() {
+		served <- Serve(ctx, specs, ServeOptions{
+			DrainTimeout:       time.Second,
+			HealthBindAddress:  healthAddr,
+			HealthCheckTimeout: 100 * time.Millisecond,
+		}, logger)
+	}()
+
+	if got := getHTTPStatusUntilReady(t, "http://"+healthAddr+"/readyz", time.Second); got != http.StatusOK {
+		t.Fatalf("/readyz: got %d want 200", got)
+	}
+
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return after cancel")
+	}
+}
+
+func TestServe_ReadyzForUDPOnlyDoesNotProbeUpstream(t *testing.T) {
+	requireUDPListenSupport(t)
+	requireTCPListenSupport(t)
+
+	listenAddr := freeUDPAddr(t)
+	healthAddr := freeAddr(t)
+	specs := []Spec{{Listen: listenAddr, Upstream: "127.0.0.1:1", Protocol: ProtocolUDP}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	logger := slog.New(slog.DiscardHandler)
+	served := make(chan error, 1)
+	go func() {
+		served <- Serve(ctx, specs, ServeOptions{
+			DrainTimeout:       time.Second,
+			HealthBindAddress:  healthAddr,
+			HealthCheckTimeout: 50 * time.Millisecond,
+		}, logger)
+	}()
+
+	if got := getHTTPStatusUntilReady(t, "http://"+healthAddr+"/readyz", time.Second); got != http.StatusOK {
+		t.Fatalf("/readyz: got %d want 200", got)
+	}
+
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return after cancel")
+	}
+}
+
 // startEchoServer runs a TCP echo on a random port and returns its addr.
 func startEchoServer(t *testing.T) string {
 	t.Helper()
@@ -245,6 +403,46 @@ func dialUntilReady(t *testing.T, addr string, within time.Duration) net.Conn {
 	}
 	t.Fatalf("proxy never came up at %s: %v", addr, lastErr)
 	return nil
+}
+
+func getHTTPStatusUntilReady(t *testing.T, url string, within time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			_ = resp.Body.Close()
+			return resp.StatusCode
+		}
+		lastErr = err
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("HTTP endpoint never came up at %s: %v", url, lastErr)
+	return 0
+}
+
+func getHTTPBodyUntilReady(t *testing.T, url string, within time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			body, rerr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if rerr == nil && resp.StatusCode == http.StatusOK {
+				return string(body)
+			}
+			lastErr = rerr
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		lastErr = err
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("HTTP endpoint body never became readable at %s: %v", url, lastErr)
+	return ""
 }
 
 func readAll(t *testing.T, r io.Reader, n int) string {

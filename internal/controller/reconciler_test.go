@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -49,6 +50,16 @@ func newSvc(class *string) *corev1.Service {
 			},
 		},
 	}
+}
+
+func namedSvc(namespace, name string, port int32) *corev1.Service {
+	svc := newSvc(nil)
+	svc.Namespace = namespace
+	svc.Name = name
+	svc.UID = types.UID(namespace + "-" + name)
+	svc.Spec.Ports[0].Port = port
+	svc.Spec.Ports[0].TargetPort = intstr.FromInt32(port)
+	return svc
 }
 
 func newReconciler(t *testing.T, objs ...client.Object) (*ServiceReconciler, client.Client) {
@@ -187,6 +198,32 @@ func TestReconcile_CleansUpOnServiceDelete(t *testing.T) {
 	err = c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected LBPort to be cleaned up after Service deletion, got err=%v", err)
+	}
+}
+
+func TestReconcile_KeepOnUninstallLeavesDaemonSetOnServiceDelete(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationKeepOnUninstall: "true"}
+	r, c := newReconciler(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+	if err := c.Delete(context.Background(), svc); err != nil {
+		t.Fatalf("delete service: %v", err)
+	}
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var ds appsv1.DaemonSet
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds); err != nil {
+		t.Fatalf("expected DaemonSet to be kept after Service deletion: %v", err)
+	}
+	if ds.Annotations[AnnotationKeepOnUninstall] != "true" {
+		t.Fatalf("expected kept DaemonSet to carry keep annotation, got %+v", ds.Annotations)
+	}
+
+	var lbport bulbv1alpha1.LBPort
+	err := c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected LBPort cleanup even when DaemonSet is kept, got err=%v", err)
 	}
 }
 
@@ -365,6 +402,30 @@ func TestReconcile_CleansUpOnTypeChange(t *testing.T) {
 	}
 }
 
+func TestReconcile_KeepOnUninstallLeavesDaemonSetOnTypeChange(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationKeepOnUninstall: "true"}
+	r, c := newReconciler(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var live corev1.Service
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &live); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	live.Spec.Type = corev1.ServiceTypeClusterIP
+	if err := c.Update(context.Background(), &live); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var ds appsv1.DaemonSet
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds); err != nil {
+		t.Fatalf("expected DaemonSet to be kept after type change: %v", err)
+	}
+}
+
 func TestServiceMatches(t *testing.T) {
 	bulb := "bulb"
 	other := "metallb"
@@ -409,6 +470,214 @@ func hasEventWith(events []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+func serviceConditionStatus(t *testing.T, c client.Client, svc *corev1.Service, typ string) metav1.ConditionStatus {
+	t.Helper()
+	var got corev1.Service
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &got); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	for _, condition := range got.Status.Conditions {
+		if condition.Type == typ {
+			return condition.Status
+		}
+	}
+	t.Fatalf("missing condition %s in %+v", typ, got.Status.Conditions)
+	return metav1.ConditionUnknown
+}
+
+func TestReconcile_SetsSuccessfulConditionsAndEvent(t *testing.T) {
+	svc := newSvc(nil)
+	r, rec, c := newReconcilerWithRecorder(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionReconciled); got != metav1.ConditionTrue {
+		t.Fatalf("Reconciled condition: got %s want True", got)
+	}
+	if got := serviceConditionStatus(t, c, svc, ConditionPortConflict); got != metav1.ConditionFalse {
+		t.Fatalf("PortConflict condition: got %s want False", got)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "Reconciled") {
+		t.Fatalf("expected Reconciled event, got %v", events)
+	}
+}
+
+func TestReconcile_PortConflictSetsConditionAndSkipsObjects(t *testing.T) {
+	svc := namedSvc("demo", "echo", 8443)
+	other := namedSvc("other", "api", 8443)
+	r, rec, c := newReconcilerWithRecorder(t, svc, other)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionPortConflict); got != metav1.ConditionTrue {
+		t.Fatalf("PortConflict condition: got %s want True", got)
+	}
+	if got := serviceConditionStatus(t, c, svc, ConditionReconciled); got != metav1.ConditionFalse {
+		t.Fatalf("Reconciled condition: got %s want False", got)
+	}
+	var ds appsv1.DaemonSet
+	err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no DaemonSet for conflicted service, got err=%v", err)
+	}
+	var lbport bulbv1alpha1.LBPort
+	err = c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no LBPort for conflicted service, got err=%v", err)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "ServicePortConflict") {
+		t.Fatalf("expected ServicePortConflict event, got %v", events)
+	}
+}
+
+func TestReconcile_MetricsSuccessOutcome(t *testing.T) {
+	svc := newSvc(nil)
+	r, _ := newReconciler(t, svc)
+
+	before := testutil.ToFloat64(reconcileTotal.WithLabelValues("success"))
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+	after := testutil.ToFloat64(reconcileTotal.WithLabelValues("success"))
+	if after != before+1 {
+		t.Fatalf("success reconcile metric: got %v want %v", after, before+1)
+	}
+}
+
+func TestReconcile_MetricsPortConflictOutcome(t *testing.T) {
+	svc := namedSvc("demo", "echo", 8443)
+	other := namedSvc("other", "api", 8443)
+	r, _ := newReconciler(t, svc, other)
+
+	before := testutil.ToFloat64(reconcileTotal.WithLabelValues("port_conflict"))
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+	after := testutil.ToFloat64(reconcileTotal.WithLabelValues("port_conflict"))
+	if after != before+1 {
+		t.Fatalf("port_conflict reconcile metric: got %v want %v", after, before+1)
+	}
+}
+
+func TestReconcile_DisjointNodeSelectorsCanSharePort(t *testing.T) {
+	svc := namedSvc("demo", "echo", 8443)
+	svc.Annotations = map[string]string{AnnotationNodes: "role=edge"}
+	other := namedSvc("other", "api", 8443)
+	other.Annotations = map[string]string{AnnotationNodes: "role=db"}
+	nodes := []client.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{"role": "edge"}}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{"role": "db"}}},
+	}
+	objects := append([]client.Object{svc, other}, nodes...)
+	r, c := newReconciler(t, objects...)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionPortConflict); got != metav1.ConditionFalse {
+		t.Fatalf("PortConflict condition: got %s want False", got)
+	}
+	var lbport bulbv1alpha1.LBPort
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "bulb-demo-echo-8443-tcp"}, &lbport); err != nil {
+		t.Fatalf("expected LBPort for disjoint node selector: %v", err)
+	}
+	if !sameStringSet(lbport.Spec.Nodes, []string{"node-a"}) {
+		t.Fatalf("expected selected node-a, got %+v", lbport.Spec.Nodes)
+	}
+}
+
+func TestReconcile_LBPortOwnerConflictSetsCondition(t *testing.T) {
+	svc := newSvc(nil)
+	existing := &bulbv1alpha1.LBPort{
+		TypeMeta: metav1.TypeMeta{APIVersion: bulbv1alpha1.GroupVersion.String(), Kind: "LBPort"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "bulb-demo-echo-8443-tcp",
+		},
+		Spec: bulbv1alpha1.LBPortSpec{
+			Port:     8443,
+			Protocol: corev1.ProtocolTCP,
+			Nodes:    []string{"*"},
+			Owner:    "someone-else",
+		},
+	}
+	r, rec, c := newReconcilerWithRecorder(t, svc, existing)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionPortConflict); got != metav1.ConditionTrue {
+		t.Fatalf("PortConflict condition: got %s want True", got)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "LBPortOwnerConflict") {
+		t.Fatalf("expected LBPortOwnerConflict event, got %v", events)
+	}
+}
+
+func TestReconcile_InvalidAnnotationSetsCondition(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationNodes: "role in ("}
+	r, rec, c := newReconcilerWithRecorder(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionInvalidService); got != metav1.ConditionTrue {
+		t.Fatalf("InvalidService condition: got %s want True", got)
+	}
+	if got := serviceConditionStatus(t, c, svc, ConditionReconciled); got != metav1.ConditionFalse {
+		t.Fatalf("Reconciled condition: got %s want False", got)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "InvalidAnnotation") {
+		t.Fatalf("expected InvalidAnnotation event, got %v", events)
+	}
+}
+
+func TestReconcile_LocalPolicyWithoutReadyEndpointsSetsCondition(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationExternalTrafficPolicy: "Local"}
+	r, rec, c := newReconcilerWithRecorder(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	if got := serviceConditionStatus(t, c, svc, ConditionNoReadyEndpoint); got != metav1.ConditionTrue {
+		t.Fatalf("NoReadyEndpoints condition: got %s want True", got)
+	}
+	if got := serviceConditionStatus(t, c, svc, ConditionReconciled); got != metav1.ConditionFalse {
+		t.Fatalf("Reconciled condition: got %s want False", got)
+	}
+	var ds appsv1.DaemonSet
+	err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no DaemonSet without ready Local endpoints, got err=%v", err)
+	}
+	events := drainEvents(rec)
+	if !hasEventWith(events, "NoReadyEndpoints") {
+		t.Fatalf("expected NoReadyEndpoints event, got %v", events)
+	}
+}
+
+func TestReconcile_KeepOnUninstallDoesNotKeepInvalidServiceDaemonSet(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationKeepOnUninstall: "true"}
+	r, c := newReconciler(t, svc)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var live corev1.Service
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &live); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	live.Annotations[AnnotationExternalTrafficPolicy] = "Local"
+	if err := c.Update(context.Background(), &live); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var ds appsv1.DaemonSet
+	err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected forced cleanup for invalid/no-ready Service despite keep-on-uninstall, got err=%v", err)
+	}
 }
 
 func TestEmitLBPortEvents_PortOpened(t *testing.T) {

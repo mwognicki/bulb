@@ -51,13 +51,18 @@ func TestBuildDaemonSet_BasicShape(t *testing.T) {
 	if c.Image != "ghcr.io/mwognicki/bulb:test" {
 		t.Fatalf("image: got %q", c.Image)
 	}
-	wantArgs := []string{"proxy", "--drain-timeout=30s", "--upstream=0.0.0.0:8443=10.96.1.5:8443"}
+	wantArgs := []string{"proxy", "--drain-timeout=30s", "--health-bind-address=:8081", "--upstream=0.0.0.0:8443=10.96.1.5:8443"}
 	if !slices.Equal(c.Args, wantArgs) {
 		t.Fatalf("args: got %v want %v", c.Args, wantArgs)
 	}
-	if len(c.Ports) != 1 || c.Ports[0].HostPort != 8443 || c.Ports[0].ContainerPort != 8443 {
+	if len(c.Ports) != 2 || c.Ports[0].HostPort != 8443 || c.Ports[0].ContainerPort != 8443 {
 		t.Fatalf("ports: got %+v", c.Ports)
 	}
+	if c.Ports[1].Name != "probes" || c.Ports[1].ContainerPort != 8081 || c.Ports[1].HostPort != 0 {
+		t.Fatalf("probe port: got %+v", c.Ports[1])
+	}
+	assertHTTPProbe(t, c.LivenessProbe, "/healthz")
+	assertHTTPProbe(t, c.ReadinessProbe, "/readyz")
 }
 
 func TestBuildDaemonSet_DropsAllCapsAndHardens(t *testing.T) {
@@ -105,6 +110,28 @@ func TestBuildDaemonSet_PrivilegedPort(t *testing.T) {
 	}
 	if ds.Spec.Template.Spec.Containers[0].Ports[0].HostPort != 80 {
 		t.Fatalf("hostPort: got %d", ds.Spec.Template.Spec.Containers[0].Ports[0].HostPort)
+	}
+}
+
+func TestBuildDaemonSet_KeepOnUninstallAnnotation(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationKeepOnUninstall: "true"}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ds.Annotations[AnnotationKeepOnUninstall] != "true" {
+		t.Fatalf("expected keep-on-uninstall annotation on DaemonSet, got %+v", ds.Annotations)
+	}
+
+	noKeep := mkSvc()
+	ds, err = BuildDaemonSet(noKeep, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := ds.Annotations[AnnotationKeepOnUninstall]; ok {
+		t.Fatalf("unexpected keep-on-uninstall annotation on DaemonSet: %+v", ds.Annotations)
 	}
 }
 
@@ -209,9 +236,7 @@ func TestBuildDaemonSet_AcceptsUDP(t *testing.T) {
 	if cport.Protocol != corev1.ProtocolUDP {
 		t.Errorf("ContainerPort.Protocol: got %s want UDP", cport.Protocol)
 	}
-	if ds.Spec.Template.Spec.Containers[0].ReadinessProbe != nil {
-		t.Errorf("UDP-only Service should have no readiness probe, got %+v", ds.Spec.Template.Spec.Containers[0].ReadinessProbe)
-	}
+	assertHTTPProbe(t, ds.Spec.Template.Spec.Containers[0].ReadinessProbe, "/readyz")
 }
 
 func TestBuildDaemonSet_MixedTCPAndUDP(t *testing.T) {
@@ -236,8 +261,19 @@ func TestBuildDaemonSet_MixedTCPAndUDP(t *testing.T) {
 		}
 	}
 	probe := ds.Spec.Template.Spec.Containers[0].ReadinessProbe
-	if probe == nil || probe.TCPSocket == nil || probe.TCPSocket.Port.IntVal != 8443 {
-		t.Errorf("readiness probe should target the TCP port 8443, got %+v", probe)
+	assertHTTPProbe(t, probe, "/readyz")
+}
+
+func assertHTTPProbe(t *testing.T, probe *corev1.Probe, path string) {
+	t.Helper()
+	if probe == nil || probe.HTTPGet == nil {
+		t.Fatalf("expected HTTP probe %s, got %+v", path, probe)
+	}
+	if probe.HTTPGet.Path != path {
+		t.Fatalf("probe path: got %q want %q", probe.HTTPGet.Path, path)
+	}
+	if probe.HTTPGet.Port.StrVal != "probes" {
+		t.Fatalf("probe port: got %+v want named port probes", probe.HTTPGet.Port)
 	}
 }
 
@@ -288,8 +324,8 @@ func TestBuildDaemonSet_MultiPort(t *testing.T) {
 		}
 	}
 	ports := ds.Spec.Template.Spec.Containers[0].Ports
-	if len(ports) != 2 {
-		t.Fatalf("expected 2 container ports, got %d", len(ports))
+	if len(ports) != 3 {
+		t.Fatalf("expected 2 service ports plus 1 probe port, got %d", len(ports))
 	}
 }
 
@@ -330,9 +366,10 @@ func TestBuildDaemonSet_DualStackEmitsBothListeners(t *testing.T) {
 		}
 	}
 	// Single ContainerPort per service port even in dual-stack: hostPort
-	// reservation covers both families.
-	if got := len(ds.Spec.Template.Spec.Containers[0].Ports); got != 1 {
-		t.Fatalf("expected 1 ContainerPort for dual-stack, got %d", got)
+	// reservation covers both families. The extra port is the HTTP
+	// liveness/readiness endpoint and has no hostPort.
+	if got := len(ds.Spec.Template.Spec.Containers[0].Ports); got != 2 {
+		t.Fatalf("expected 1 service ContainerPort plus 1 probe port for dual-stack, got %d", got)
 	}
 }
 

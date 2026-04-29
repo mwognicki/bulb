@@ -20,13 +20,16 @@ const (
 	AnnotationAllowPrivilegedPort   = "bulb.toturi.tech/allow-privileged-port"
 	AnnotationProxyProtocol         = "bulb.toturi.tech/proxy-protocol"
 	AnnotationExternalTrafficPolicy = "bulb.toturi.tech/external-traffic-policy"
+	AnnotationKeepOnUninstall       = "bulb.toturi.tech/keep-on-uninstall"
 
 	labelManagedBy   = "app.kubernetes.io/managed-by"
 	labelManagedByV  = "bulb"
 	labelService     = "bulb.toturi.tech/service"
 	labelServiceNs   = "bulb.toturi.tech/service-namespace"
 	containerName    = "proxy"
+	probePortName    = "probes"
 	defaultDrainTime = "30s"
+	defaultProbeAddr = ":8081"
 )
 
 // ServiceEndpoints maps Service port names to ready endpoint upstreams
@@ -84,12 +87,14 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string, endpointSets .
 	}
 
 	labels := serviceLabels(svc)
+	annotations := daemonSetAnnotations(svc)
 
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      DaemonSetName(svc),
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        DaemonSetName(svc),
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
@@ -105,8 +110,8 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string, endpointSets .
 						Name:            containerName,
 						Image:           image,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Args:            append([]string{"proxy", "--drain-timeout=" + defaultDrainTime}, args...),
-						Ports:           ports,
+						Args:            append([]string{"proxy", "--drain-timeout=" + defaultDrainTime, "--health-bind-address=" + defaultProbeAddr}, args...),
+						Ports:           append(ports, healthContainerPort()),
 						SecurityContext: hardenedSecurityContext(),
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
@@ -117,13 +122,21 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string, endpointSets .
 								corev1.ResourceMemory: resource.MustParse("128Mi"),
 							},
 						},
-						ReadinessProbe: readinessProbe(svc),
+						LivenessProbe:  httpProbe("/healthz"),
+						ReadinessProbe: httpProbe("/readyz"),
 					}},
 				},
 			},
 		},
 	}
 	return ds, nil
+}
+
+func daemonSetAnnotations(svc *corev1.Service) map[string]string {
+	if svc.Annotations[AnnotationKeepOnUninstall] != "true" {
+		return nil
+	}
+	return map[string]string{AnnotationKeepOnUninstall: "true"}
 }
 
 // DaemonSetName returns the deterministic per-Service DS name.
@@ -212,34 +225,24 @@ func upstreamFlag(p corev1.Protocol) string {
 	return "upstream"
 }
 
-// readinessProbe returns a TCPSocket probe scoped to the first TCP
-// port. UDP-only Services get no readiness probe — kubelet's only
-// built-in checks (TCP, HTTP, exec) don't fit a UDP listener, and a
-// false-positive ready signal is worse than no signal here.
-func readinessProbe(svc *corev1.Service) *corev1.Probe {
-	port := firstTCPPort(svc)
-	if port == 0 {
-		return nil
-	}
-	return &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
-		},
-		PeriodSeconds: 5,
+func healthContainerPort() corev1.ContainerPort {
+	return corev1.ContainerPort{
+		Name:          probePortName,
+		ContainerPort: 8081,
+		Protocol:      corev1.ProtocolTCP,
 	}
 }
 
-// firstTCPPort returns the first TCP service port, or 0 if none.
-// Used to scope the readiness probe — TCP-only because the kubelet
-// probe is a TCP socket connect.
-func firstTCPPort(svc *corev1.Service) int32 {
-	for _, p := range svc.Spec.Ports {
-		proto := p.Protocol
-		if proto == "" || proto == corev1.ProtocolTCP {
-			return p.Port
-		}
+func httpProbe(path string) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: path,
+				Port: intstr.FromString(probePortName),
+			},
+		},
+		PeriodSeconds: 5,
 	}
-	return 0
 }
 
 // splitClusterIPs returns the IPv4 and IPv6 ClusterIPs for a Service.

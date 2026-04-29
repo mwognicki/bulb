@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"time"
 
 	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -45,40 +47,92 @@ type ServiceReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile implements the controller-runtime Reconciler interface.
-func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
+	started := time.Now()
+	outcome := "success"
+	defer func() {
+		if err != nil {
+			outcome = "error"
+		}
+		reconcileTotal.WithLabelValues(outcome).Inc()
+		reconcileDuration.WithLabelValues(outcome).Observe(time.Since(started).Seconds())
+	}()
+
 	logger := log.FromContext(ctx).WithValues("service", req.NamespacedName)
 
 	var svc corev1.Service
-	if err := r.Get(ctx, req.NamespacedName, &svc); err != nil {
+	if err = r.Get(ctx, req.NamespacedName, &svc); err != nil {
 		if apierrors.IsNotFound(err) {
+			outcome = "cleanup_not_found"
 			// Service is gone; clean up the DS we created for it. Cross-namespace
 			// OwnerReferences are disallowed for namespaced kinds, so we can't
 			// rely on Kubernetes GC.
-			return r.cleanupByName(ctx, req.Namespace, req.Name)
+			return r.cleanupByName(ctx, req.Namespace, req.Name, cleanupHonorKeep)
 		}
 		return ctrl.Result{}, fmt.Errorf("get service: %w", err)
 	}
 
 	if !ServiceMatches(&svc) {
-		return r.cleanupByName(ctx, svc.Namespace, svc.Name)
+		outcome = "cleanup_non_bulb"
+		return r.cleanupByName(ctx, svc.Namespace, svc.Name, cleanupModeForService(&svc))
 	}
 
-	endpoints, err := r.serviceEndpoints(ctx, &svc)
+	var endpoints ServiceEndpoints
+	endpoints, err = r.serviceEndpoints(ctx, &svc)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("read service endpoints: %w", err)
 	}
-	desired, err := BuildDaemonSet(&svc, r.Image, r.Namespace, endpoints)
+	if svc.Annotations[AnnotationExternalTrafficPolicy] == "Local" && endpoints.empty() {
+		outcome = "no_ready_endpoints"
+		msg := fmt.Sprintf("Service %s/%s uses externalTrafficPolicy=Local but has no ready endpoints", svc.Namespace, svc.Name)
+		r.eventf(&svc, corev1.EventTypeWarning, "NoReadyEndpoints", msg)
+		if err := r.updateStatus(ctx, &svc, nil,
+			serviceCondition(&svc, ConditionNoReadyEndpoint, metav1.ConditionTrue, "NoReadyEndpoints", msg),
+			serviceCondition(&svc, ConditionReconciled, metav1.ConditionFalse, "NoReadyEndpoints", msg),
+			serviceCondition(&svc, ConditionPortConflict, metav1.ConditionFalse, "NoConflict", "No port conflict detected"),
+			serviceCondition(&svc, ConditionInvalidService, metav1.ConditionFalse, "Valid", "Service annotations and ports are valid"),
+		); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update no-ready-endpoints condition: %w", err)
+		}
+		return r.cleanupByName(ctx, svc.Namespace, svc.Name, cleanupForceDelete)
+	}
+
+	var lbports []bulbv1alpha1.LBPort
+	lbports, err = r.BuildLBPorts(ctx, &svc)
 	if err != nil {
+		outcome = "invalid_service"
+		return r.markInvalidService(ctx, &svc, "InvalidAnnotation", err)
+	}
+
+	var conflict *portConflict
+	conflict, err = r.detectPortConflict(ctx, &svc, lbports)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("detect port conflicts: %w", err)
+	}
+	if conflict != nil {
+		outcome = "port_conflict"
+		r.eventf(&svc, corev1.EventTypeWarning, conflict.Reason, conflict.Message)
+		if err := r.updateStatus(ctx, &svc, nil,
+			serviceCondition(&svc, ConditionPortConflict, metav1.ConditionTrue, conflict.Reason, conflict.Message),
+			serviceCondition(&svc, ConditionReconciled, metav1.ConditionFalse, conflict.Reason, conflict.Message),
+			serviceCondition(&svc, ConditionInvalidService, metav1.ConditionFalse, "Valid", "Service annotations and ports are valid"),
+			serviceCondition(&svc, ConditionNoReadyEndpoint, metav1.ConditionFalse, "ReadyEndpointsFound", "Ready endpoints are available or not required"),
+		); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update port conflict condition: %w", err)
+		}
+		return r.cleanupByName(ctx, svc.Namespace, svc.Name, cleanupForceDelete)
+	}
+
+	var desired *appsv1.DaemonSet
+	desired, err = BuildDaemonSet(&svc, r.Image, r.Namespace, endpoints)
+	if err != nil {
+		outcome = "invalid_service"
 		logger.Error(err, "build daemonset failed")
-		return ctrl.Result{}, err
+		return r.markInvalidService(ctx, &svc, "InvalidService", err)
 	}
 
 	if err := r.applyDaemonSet(ctx, desired); err != nil {
 		return ctrl.Result{}, err
-	}
-	lbports, err := r.BuildLBPorts(ctx, &svc)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("build lbports: %w", err)
 	}
 	if err := r.applyLBPorts(ctx, lbports, &svc); err != nil {
 		return ctrl.Result{}, err
@@ -100,9 +154,15 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	logDNSConfig(ctx, &svc, dnsRecs)
 
-	if err := r.updateStatus(ctx, &svc, ips); err != nil {
+	if err := r.updateStatus(ctx, &svc, ips,
+		serviceCondition(&svc, ConditionReconciled, metav1.ConditionTrue, "Reconciled", "Service reconciled successfully"),
+		serviceCondition(&svc, ConditionPortConflict, metav1.ConditionFalse, "NoConflict", "No port conflict detected"),
+		serviceCondition(&svc, ConditionInvalidService, metav1.ConditionFalse, "Valid", "Service annotations and ports are valid"),
+		serviceCondition(&svc, ConditionNoReadyEndpoint, metav1.ConditionFalse, "ReadyEndpointsFound", "Ready endpoints are available or not required"),
+	); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update service status: %w", err)
 	}
+	r.eventf(&svc, corev1.EventTypeNormal, "Reconciled", "Service reconciled successfully")
 
 	return ctrl.Result{}, nil
 }
@@ -137,23 +197,60 @@ func (r *ServiceReconciler) applyDaemonSet(ctx context.Context, desired *appsv1.
 	}
 
 	if equality.Semantic.DeepEqual(existing.Spec, desired.Spec) &&
-		equality.Semantic.DeepEqual(existing.Labels, desired.Labels) {
+		equality.Semantic.DeepEqual(existing.Labels, desired.Labels) &&
+		equality.Semantic.DeepEqual(existing.Annotations, desired.Annotations) {
 		return nil
 	}
 
 	existing.Spec = desired.Spec
 	existing.Labels = desired.Labels
+	existing.Annotations = desired.Annotations
 	if err := r.Update(ctx, &existing); err != nil {
 		return fmt.Errorf("update daemonset: %w", err)
 	}
 	return nil
 }
 
+func (r *ServiceReconciler) markInvalidService(ctx context.Context, svc *corev1.Service, reason string, cause error) (ctrl.Result, error) {
+	msg := cause.Error()
+	r.eventf(svc, corev1.EventTypeWarning, reason, msg)
+	if err := r.updateStatus(ctx, svc, nil,
+		serviceCondition(svc, ConditionInvalidService, metav1.ConditionTrue, reason, msg),
+		serviceCondition(svc, ConditionReconciled, metav1.ConditionFalse, reason, msg),
+		serviceCondition(svc, ConditionPortConflict, metav1.ConditionFalse, "NoConflict", "No port conflict detected"),
+		serviceCondition(svc, ConditionNoReadyEndpoint, metav1.ConditionFalse, "ReadyEndpointsFound", "Ready endpoints are available or not required"),
+	); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update invalid service condition: %w", err)
+	}
+	return r.cleanupByName(ctx, svc.Namespace, svc.Name, cleanupForceDelete)
+}
+
+func (r *ServiceReconciler) eventf(svc *corev1.Service, eventType, reason, message string) {
+	if r.EventRecorder == nil {
+		return
+	}
+	r.Eventf(svc, eventType, reason, "%s", message)
+}
+
 // cleanupByName deletes the DaemonSet that BuildDaemonSet would have
 // produced for (svcNamespace, svcName). The labels we put on the DS
 // pin it to that Service, so we can confirm we own the object before
 // deleting.
-func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svcName string) (ctrl.Result, error) {
+type cleanupMode int
+
+const (
+	cleanupForceDelete cleanupMode = iota
+	cleanupHonorKeep
+)
+
+func cleanupModeForService(svc *corev1.Service) cleanupMode {
+	if svc.Annotations[AnnotationKeepOnUninstall] == "true" {
+		return cleanupHonorKeep
+	}
+	return cleanupForceDelete
+}
+
+func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svcName string, mode cleanupMode) (ctrl.Result, error) {
 	dsName := fmt.Sprintf("bulb-%s-%s", svcNamespace, svcName)
 	var ds appsv1.DaemonSet
 	err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: dsName}, &ds)
@@ -173,8 +270,10 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 		// Name collision with something we don't own. Refuse to delete.
 		return ctrl.Result{}, nil
 	}
-	if err := r.Delete(ctx, &ds); err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("delete daemonset: %w", err)
+	if mode == cleanupForceDelete || ds.Annotations[AnnotationKeepOnUninstall] != "true" {
+		if err := r.Delete(ctx, &ds); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("delete daemonset: %w", err)
+		}
 	}
 	if err := r.cleanupLBPorts(ctx, svcNamespace, svcName); err != nil {
 		return ctrl.Result{}, err
@@ -213,19 +312,6 @@ func (r *ServiceReconciler) nodePublicIPs(ctx context.Context) ([]string, error)
 	}
 	sort.Strings(ips)
 	return ips, nil
-}
-
-func (r *ServiceReconciler) updateStatus(ctx context.Context, svc *corev1.Service, ips []string) error {
-	desired := make([]corev1.LoadBalancerIngress, 0, len(ips))
-	for _, ip := range ips {
-		desired = append(desired, corev1.LoadBalancerIngress{IP: ip})
-	}
-	if equality.Semantic.DeepEqual(svc.Status.LoadBalancer.Ingress, desired) {
-		return nil
-	}
-	patched := svc.DeepCopy()
-	patched.Status.LoadBalancer.Ingress = desired
-	return r.Status().Patch(ctx, patched, client.MergeFrom(svc))
 }
 
 // SetupWithManager wires the reconciler into the manager and limits
@@ -272,6 +358,15 @@ func (r *ServiceReconciler) serviceEndpoints(ctx context.Context, svc *corev1.Se
 		return nil, fmt.Errorf("get endpoints %s: %w", key.String(), err)
 	}
 	return endpointsByServicePort(&eps, svc), nil
+}
+
+func (s ServiceEndpoints) empty() bool {
+	for _, endpoints := range s {
+		if len(endpoints) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func endpointsByServicePort(eps *corev1.Endpoints, svc *corev1.Service) ServiceEndpoints {
