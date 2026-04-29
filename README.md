@@ -5,10 +5,10 @@ A small Kubernetes `type=LoadBalancer` controller for clusters that don't have a
 If you run kubeadm on a handful of VPS nodes — each with its own pinned public IP, no floating IPs, no shared L2, no BGP — then `kubectl apply` of a `type=LoadBalancer` Service just sits in `<pending>` forever. bulb is a Klipper-style fix for that case: it puts a tiny L4 proxy on every node's hostPort, opens the matching port in the host firewall, and computes dry-run DNS record targets for operators to publish manually.
 
 > **Status: pre-alpha.** The current tagged baseline is `v0.0.5`.
-> Phases 1 and 3 are done, Phases 2 and 4 are mostly done, and Phase 5 has not
-> started. The project has controller, proxy, firewall-agent, DNSRecord dry-run,
-> and node-ip-labeler pieces, but it is still not a polished installable
-> product: contract tightening and packaging remain.
+> Phases 1–4 are done or mostly done. The project has controller, proxy,
+> firewall-agent, DNSRecord dry-run, and node-ip-labeler pieces with a
+> tightened operator contract. Helm packaging is the remaining step before
+> a first usable release.
 
 ## How it works
 
@@ -106,7 +106,7 @@ Before applying them:
 
 - Make sure the `ghcr.io/mwognicki/bulb:v0.0.5` image exists and is pullable from your cluster.
 - Pick the firewall backend that matches your nodes: `firewalld`, `iptables`, or `nftables`.
-- The old `node-ips` ConfigMap path is deprecated. Public IPs now come from Node annotations written by the `node-ip-labeler` DaemonSet.
+- Public IPs are discovered automatically by the `node-ip-labeler` DaemonSet and stored as Node annotations (`bulb.toturi.tech/public-ipv4`, `bulb.toturi.tech/public-ipv6`). No manual ConfigMap is needed.
 
 Apply the core manifests in this order:
 
@@ -220,12 +220,10 @@ Practical validation expectations by backend:
 - `iptables`: both `iptables` and `ip6tables` must be present and their `INPUT` chains must be inspectable
 - `nftables`: the `nft` binary must be present and `nft list tables` must succeed
 
-## Contract-tightening Before Helm
+## Next: Helm Packaging
 
-Helm is intentionally still missing. Before adding `deploy/helm/bulb/`,
-the project should tighten the operator contract that Helm would package:
-
-- Update docs whenever behavior changes; remove stale Phase 1/static ConfigMap language.
+The operator contract is tightened. The next step is adding `deploy/helm/bulb/`
+to package the current manifest set as a Helm chart.
 
 ## Release Automation
 
@@ -248,7 +246,7 @@ bulb has been built as incremental deployable slices. Current completeness:
 | 2. Firewall agent | Mostly done | `LBPort` CRD and firewall-agent exist with firewalld, iptables, nftables, dry-run mode, validation, status, events, cleanup, and metrics. Controller-side Service/LBPort conflict detection now surfaces `PortConflict=True`; remaining work is mostly broader health/metrics contract polish. |
 | 3. DNS dry-run | Done | Controller emits `DNSRecord` CRs that describe desired records. Provider publishing is intentionally deferred. |
 | 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, proxy health probes, `keep-on-uninstall`, custom controller/proxy metrics, and multi-arch-capable Docker builds are present. Local endpoint routing intentionally uses core `Endpoints`, not EndpointSlices. |
-| 5. Packaging and contract hardening | Not started | Next practical focus: Helm packaging. |
+| 5. Helm packaging | Next | Operator contract is tightened; Helm chart authoring is the next step. |
 
 ## Building
 
