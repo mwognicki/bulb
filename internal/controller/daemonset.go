@@ -3,6 +3,9 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"net"
+	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -13,8 +16,10 @@ import (
 
 // Annotation keys; mirror the table in CLAUDE.md.
 const (
-	AnnotationNodes               = "bulb.toturi.tech/nodes"
-	AnnotationAllowPrivilegedPort = "bulb.toturi.tech/allow-privileged-port"
+	AnnotationNodes                 = "bulb.toturi.tech/nodes"
+	AnnotationAllowPrivilegedPort   = "bulb.toturi.tech/allow-privileged-port"
+	AnnotationProxyProtocol         = "bulb.toturi.tech/proxy-protocol"
+	AnnotationExternalTrafficPolicy = "bulb.toturi.tech/external-traffic-policy"
 
 	labelManagedBy   = "app.kubernetes.io/managed-by"
 	labelManagedByV  = "bulb"
@@ -23,6 +28,10 @@ const (
 	containerName    = "proxy"
 	defaultDrainTime = "30s"
 )
+
+// ServiceEndpoints maps Service port names to ready endpoint upstreams
+// ("ip:port" or "[ipv6]:port"). The empty key is used for unnamed ports.
+type ServiceEndpoints map[string][]string
 
 // ErrPrivilegedPortDenied is returned when a Service requests a port < 1024
 // without the bulb.toturi.tech/allow-privileged-port="true" opt-in annotation.
@@ -41,11 +50,11 @@ var ErrPrivilegedPortDenied = errors.New("port < 1024 requires bulb.toturi.tech/
 // performs explicit cleanup on Service delete or type change. Revisit
 // only if bulb ever moves to one DS per namespace alongside the
 // Service, in which case OwnerReferences become viable.
-func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.DaemonSet, error) {
+func BuildDaemonSet(svc *corev1.Service, image, namespace string, endpointSets ...ServiceEndpoints) (*appsv1.DaemonSet, error) {
 	if svc == nil {
 		return nil, errors.New("service is nil")
 	}
-	if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == corev1.ClusterIPNone {
+	if v4, v6 := splitClusterIPs(svc); v4 == "" && v6 == "" {
 		return nil, fmt.Errorf("service %s/%s has no ClusterIP", svc.Namespace, svc.Name)
 	}
 	if len(svc.Spec.Ports) == 0 {
@@ -59,7 +68,12 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.Daemo
 		}
 	}
 
-	ports, args, err := portsAndArgs(svc)
+	proxyProtocol := svc.Annotations[AnnotationProxyProtocol]
+	endpoints := ServiceEndpoints(nil)
+	if svc.Annotations[AnnotationExternalTrafficPolicy] == "Local" && len(endpointSets) > 0 {
+		endpoints = endpointSets[0]
+	}
+	ports, args, err := portsAndArgs(svc, proxyProtocol, endpoints)
 	if err != nil {
 		return nil, err
 	}
@@ -103,12 +117,7 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.Daemo
 								corev1.ResourceMemory: resource.MustParse("128Mi"),
 							},
 						},
-						ReadinessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(svc.Spec.Ports[0].Port)},
-							},
-							PeriodSeconds: 5,
-						},
+						ReadinessProbe: readinessProbe(svc),
 					}},
 				},
 			},
@@ -122,12 +131,18 @@ func DaemonSetName(svc *corev1.Service) string {
 	return fmt.Sprintf("bulb-%s-%s", svc.Namespace, svc.Name)
 }
 
-func portsAndArgs(svc *corev1.Service) ([]corev1.ContainerPort, []string, error) {
+func portsAndArgs(svc *corev1.Service, proxyProtocol string, endpoints ServiceEndpoints) ([]corev1.ContainerPort, []string, error) {
+	v4ClusterIP, v6ClusterIP := splitClusterIPs(svc)
+
 	ports := make([]corev1.ContainerPort, 0, len(svc.Spec.Ports))
 	args := make([]string, 0, len(svc.Spec.Ports))
 	for _, p := range svc.Spec.Ports {
-		if p.Protocol != "" && p.Protocol != corev1.ProtocolTCP {
-			return nil, nil, fmt.Errorf("port %d: only TCP supported in Phase 1, got %s", p.Port, p.Protocol)
+		protocol := p.Protocol
+		if protocol == "" {
+			protocol = corev1.ProtocolTCP
+		}
+		if protocol != corev1.ProtocolTCP && protocol != corev1.ProtocolUDP {
+			return nil, nil, fmt.Errorf("port %d: unsupported protocol %s (only TCP and UDP)", p.Port, protocol)
 		}
 		target := p.TargetPort.String()
 		if target == "" || target == "0" {
@@ -137,11 +152,123 @@ func portsAndArgs(svc *corev1.Service) ([]corev1.ContainerPort, []string, error)
 			Name:          portName(p),
 			ContainerPort: p.Port,
 			HostPort:      p.Port,
-			Protocol:      corev1.ProtocolTCP,
+			Protocol:      protocol,
 		})
-		args = append(args, fmt.Sprintf("--upstream=0.0.0.0:%d=%s:%s", p.Port, svc.Spec.ClusterIP, target))
+		flag := upstreamFlag(protocol)
+		if v4ClusterIP != "" {
+			listen := fmt.Sprintf("0.0.0.0:%d", p.Port)
+			args = append(args, fmt.Sprintf("--%s=%s=%s:%s", flag, listen, v4ClusterIP, target))
+			args = appendEndpointArg(args, listen, endpointUpstreamsForFamily(endpoints[endpointKey(p)], false))
+		}
+		if v6ClusterIP != "" {
+			listen := fmt.Sprintf("[::]:%d", p.Port)
+			args = append(args, fmt.Sprintf("--%s=%s=[%s]:%s", flag, listen, v6ClusterIP, target))
+			args = appendEndpointArg(args, listen, endpointUpstreamsForFamily(endpoints[endpointKey(p)], true))
+		}
+	}
+	if proxyProtocol != "" {
+		args = append(args, "--proxy-protocol="+proxyProtocol)
 	}
 	return ports, args, nil
+}
+
+func appendEndpointArg(args []string, listen string, endpoints []string) []string {
+	if len(endpoints) == 0 {
+		return args
+	}
+	return append(args, fmt.Sprintf("--endpoint=%s=%s", listen, strings.Join(endpoints, ",")))
+}
+
+func endpointKey(p corev1.ServicePort) string {
+	return p.Name
+}
+
+func endpointUpstreamsForFamily(endpoints []string, ipv6 bool) []string {
+	out := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		host, _, err := net.SplitHostPort(endpoint)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(strings.Trim(host, "[]"))
+		if ip == nil {
+			continue
+		}
+		if (ip.To4() == nil) == ipv6 {
+			out = append(out, endpoint)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// upstreamFlag picks the proxy CLI flag for a given Service port
+// protocol. TCP uses --upstream (the Phase 1 flag, retained for
+// compatibility); UDP uses --udp-upstream.
+func upstreamFlag(p corev1.Protocol) string {
+	if p == corev1.ProtocolUDP {
+		return "udp-upstream"
+	}
+	return "upstream"
+}
+
+// readinessProbe returns a TCPSocket probe scoped to the first TCP
+// port. UDP-only Services get no readiness probe — kubelet's only
+// built-in checks (TCP, HTTP, exec) don't fit a UDP listener, and a
+// false-positive ready signal is worse than no signal here.
+func readinessProbe(svc *corev1.Service) *corev1.Probe {
+	port := firstTCPPort(svc)
+	if port == 0 {
+		return nil
+	}
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
+		},
+		PeriodSeconds: 5,
+	}
+}
+
+// firstTCPPort returns the first TCP service port, or 0 if none.
+// Used to scope the readiness probe — TCP-only because the kubelet
+// probe is a TCP socket connect.
+func firstTCPPort(svc *corev1.Service) int32 {
+	for _, p := range svc.Spec.Ports {
+		proto := p.Protocol
+		if proto == "" || proto == corev1.ProtocolTCP {
+			return p.Port
+		}
+	}
+	return 0
+}
+
+// splitClusterIPs returns the IPv4 and IPv6 ClusterIPs for a Service.
+// It prefers Spec.ClusterIPs (dual-stack); falls back to Spec.ClusterIP.
+// Either return value may be empty if the Service is single-stack.
+func splitClusterIPs(svc *corev1.Service) (v4, v6 string) {
+	candidates := svc.Spec.ClusterIPs
+	if len(candidates) == 0 && svc.Spec.ClusterIP != "" {
+		candidates = []string{svc.Spec.ClusterIP}
+	}
+	for _, raw := range candidates {
+		if raw == "" || raw == corev1.ClusterIPNone {
+			continue
+		}
+		ip := net.ParseIP(raw)
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
+			if v4 == "" {
+				v4 = raw
+			}
+		} else {
+			if v6 == "" {
+				v6 = raw
+			}
+		}
+	}
+	return v4, v6
 }
 
 func portName(p corev1.ServicePort) string {

@@ -1,6 +1,7 @@
-# Phase 1 placeholder: a flat node-name → public IPv4 map. Phase 4
-# will replace this with node annotations written by node-ip-labeler;
-# delete this ConfigMap then.
+# DEPRECATED: This ConfigMap is no longer used. Per-node public IPs are
+# now discovered automatically by the node-ip-labeler DaemonSet and
+# stored as Node annotations (bulb.toturi.tech/public-ipv4,
+# bulb.toturi.tech/public-ipv6). You can safely delete this file.
 apiVersion: v1
 kind: ConfigMap
 metadata:

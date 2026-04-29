@@ -10,6 +10,7 @@ import (
 	"github.com/mwognicki/bulb/internal/controller"
 	"github.com/mwognicki/bulb/internal/dns"
 	"github.com/mwognicki/bulb/internal/firewall"
+	"github.com/mwognicki/bulb/internal/labeler"
 	"github.com/mwognicki/bulb/internal/proxy"
 )
 
@@ -31,6 +32,8 @@ func main() {
 		err = firewall.Run(args)
 	case "dns-agent":
 		err = dns.Run(args)
+	case "node-ip-labeler":
+		err = labeler.Run(args)
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return
@@ -59,5 +62,6 @@ Subcommands:
   firewall-agent   Reconcile the desired per-node exposure set from
                    LBPort CRs into a concrete firewall backend.
   dns-agent        Publish DNSRecord CRs to a DNS provider (Cloudflare).
+  node-ip-labeler  Discover and annotate each Node with its public IPs.
 `)
 }

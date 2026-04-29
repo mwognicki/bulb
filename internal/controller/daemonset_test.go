@@ -185,12 +185,68 @@ func TestBuildDaemonSet_NodePlacement_Invalid(t *testing.T) {
 	}
 }
 
-func TestBuildDaemonSet_RejectsNonTCP(t *testing.T) {
+func TestBuildDaemonSet_AcceptsUDP(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
-		s.Spec.Ports[0].Protocol = corev1.ProtocolUDP
+		s.Spec.Ports = []corev1.ServicePort{{
+			Name: "dns", Port: 5353, TargetPort: intstr.FromInt32(5353), Protocol: corev1.ProtocolUDP,
+		}}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("expected UDP service to build, got err=%v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	want := "--udp-upstream=0.0.0.0:5353=10.96.1.5:5353"
+	if !slices.Contains(args, want) {
+		t.Errorf("missing %q in %v", want, args)
+	}
+	for _, a := range args {
+		if a == "--upstream=0.0.0.0:5353=10.96.1.5:5353" {
+			t.Errorf("UDP port should not produce --upstream flag: %v", args)
+		}
+	}
+	cport := ds.Spec.Template.Spec.Containers[0].Ports[0]
+	if cport.Protocol != corev1.ProtocolUDP {
+		t.Errorf("ContainerPort.Protocol: got %s want UDP", cport.Protocol)
+	}
+	if ds.Spec.Template.Spec.Containers[0].ReadinessProbe != nil {
+		t.Errorf("UDP-only Service should have no readiness probe, got %+v", ds.Spec.Template.Spec.Containers[0].ReadinessProbe)
+	}
+}
+
+func TestBuildDaemonSet_MixedTCPAndUDP(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Spec.Ports = []corev1.ServicePort{
+			{Name: "https", Port: 8443, TargetPort: intstr.FromInt32(8443), Protocol: corev1.ProtocolTCP},
+			{Name: "dns", Port: 5353, TargetPort: intstr.FromInt32(5353), Protocol: corev1.ProtocolUDP},
+		}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	wants := []string{
+		"--upstream=0.0.0.0:8443=10.96.1.5:8443",
+		"--udp-upstream=0.0.0.0:5353=10.96.1.5:5353",
+	}
+	for _, w := range wants {
+		if !slices.Contains(args, w) {
+			t.Errorf("missing %q in %v", w, args)
+		}
+	}
+	probe := ds.Spec.Template.Spec.Containers[0].ReadinessProbe
+	if probe == nil || probe.TCPSocket == nil || probe.TCPSocket.Port.IntVal != 8443 {
+		t.Errorf("readiness probe should target the TCP port 8443, got %+v", probe)
+	}
+}
+
+func TestBuildDaemonSet_RejectsSCTP(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Spec.Ports[0].Protocol = corev1.ProtocolSCTP
 	})
 	if _, err := BuildDaemonSet(svc, "img", "bulb-system"); err == nil {
-		t.Fatal("expected error for UDP in Phase 1")
+		t.Fatal("expected error for SCTP")
 	}
 }
 
@@ -234,6 +290,95 @@ func TestBuildDaemonSet_MultiPort(t *testing.T) {
 	ports := ds.Spec.Template.Spec.Containers[0].Ports
 	if len(ports) != 2 {
 		t.Fatalf("expected 2 container ports, got %d", len(ports))
+	}
+}
+
+func TestBuildDaemonSet_LocalExternalTrafficPolicyAddsEndpoints(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationExternalTrafficPolicy: "Local"}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system", ServiceEndpoints{
+		"https": {"10.244.1.7:9443", "10.244.1.8:9443", "[fd00::7]:9443"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	want := "--endpoint=0.0.0.0:8443=10.244.1.7:9443,10.244.1.8:9443"
+	if !slices.Contains(args, want) {
+		t.Fatalf("missing endpoint arg %q in %v", want, args)
+	}
+}
+
+func TestBuildDaemonSet_DualStackEmitsBothListeners(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Spec.ClusterIPs = []string{"10.96.1.5", "fd00::1"}
+		s.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv4Protocol, corev1.IPv6Protocol}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	wantUpstreams := []string{
+		"--upstream=0.0.0.0:8443=10.96.1.5:8443",
+		"--upstream=[::]:8443=[fd00::1]:8443",
+	}
+	for _, w := range wantUpstreams {
+		if !slices.Contains(args, w) {
+			t.Errorf("missing arg %q in %v", w, args)
+		}
+	}
+	// Single ContainerPort per service port even in dual-stack: hostPort
+	// reservation covers both families.
+	if got := len(ds.Spec.Template.Spec.Containers[0].Ports); got != 1 {
+		t.Fatalf("expected 1 ContainerPort for dual-stack, got %d", got)
+	}
+}
+
+func TestBuildDaemonSet_LocalExternalTrafficPolicyDualStackEndpoints(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationExternalTrafficPolicy: "Local"}
+		s.Spec.ClusterIPs = []string{"10.96.1.5", "fd00::1"}
+		s.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv4Protocol, corev1.IPv6Protocol}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system", ServiceEndpoints{
+		"https": {"10.244.1.7:9443", "[fd00::7]:9443"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	wants := []string{
+		"--endpoint=0.0.0.0:8443=10.244.1.7:9443",
+		"--endpoint=[::]:8443=[fd00::7]:9443",
+	}
+	for _, w := range wants {
+		if !slices.Contains(args, w) {
+			t.Errorf("missing %q in %v", w, args)
+		}
+	}
+}
+
+func TestBuildDaemonSet_IPv6OnlyService(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Spec.ClusterIP = "fd00::1"
+		s.Spec.ClusterIPs = []string{"fd00::1"}
+		s.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv6Protocol}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	want := "--upstream=[::]:8443=[fd00::1]:8443"
+	if !slices.Contains(args, want) {
+		t.Errorf("missing %q in %v", want, args)
+	}
+	for _, a := range args {
+		if a == "--upstream=0.0.0.0:8443=fd00::1:8443" {
+			t.Errorf("v6-only service should not produce a 0.0.0.0 listener: %v", args)
+		}
 	}
 }
 

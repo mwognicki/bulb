@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: bulb-node-ip-labeler
+  namespace: bulb-system
+  labels:
+    app.kubernetes.io/name: bulb
+    app.kubernetes.io/component: node-ip-labeler
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bulb
+      app.kubernetes.io/component: node-ip-labeler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bulb
+        app.kubernetes.io/component: node-ip-labeler
+    spec:
+      hostNetwork: true
+      serviceAccountName: bulb-node-ip-labeler
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: labeler
+          image: ghcr.io/mwognicki/bulb:v0.0.5
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+          args:
+            - node-ip-labeler
+            - --node-name=$(NODE_NAME)
+            - --interval=60s
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]

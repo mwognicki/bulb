@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 
 	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
@@ -32,15 +33,15 @@ type ServiceReconciler struct {
 	Scheme *runtime.Scheme
 	record.EventRecorder
 
-	Namespace        string
-	Image            string
-	NodeIPsConfigMap string
+	Namespace string
+	Image     string
 }
 
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=services/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=endpoints,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile implements the controller-runtime Reconciler interface.
@@ -62,7 +63,11 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return r.cleanupByName(ctx, svc.Namespace, svc.Name)
 	}
 
-	desired, err := BuildDaemonSet(&svc, r.Image, r.Namespace)
+	endpoints, err := r.serviceEndpoints(ctx, &svc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("read service endpoints: %w", err)
+	}
+	desired, err := BuildDaemonSet(&svc, r.Image, r.Namespace, endpoints)
 	if err != nil {
 		logger.Error(err, "build daemonset failed")
 		return ctrl.Result{}, err
@@ -83,17 +88,17 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	r.emitLBPortEvents(ctx, &svc)
 
-	ips, err := r.publicIPs(ctx)
+	ips, err := r.nodePublicIPs(ctx)
 	if err != nil {
-		logger.Error(err, "read node-ips configmap; status will not be updated this round")
+		logger.Error(err, "read node public IPs; status will not be updated this round")
 		return ctrl.Result{}, err
 	}
 
-	dnsRec := BuildDNSRecord(&svc, ips)
-	if err := r.applyDNSRecord(ctx, dnsRec, &svc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("apply dnsrecord: %w", err)
+	dnsRecs := BuildDNSRecords(&svc, ips)
+	if err := r.applyDNSRecords(ctx, dnsRecs, &svc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("apply dnsrecords: %w", err)
 	}
-	logDNSConfig(ctx, &svc, dnsRec)
+	logDNSConfig(ctx, &svc, dnsRecs)
 
 	if err := r.updateStatus(ctx, &svc, ips); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update service status: %w", err)
@@ -180,27 +185,30 @@ func (r *ServiceReconciler) cleanupByName(ctx context.Context, svcNamespace, svc
 	return ctrl.Result{}, nil
 }
 
-// publicIPs reads the node-ips ConfigMap and returns a sorted list of
-// public IPv4 addresses, one per node entry.
-//
-// Phase 4 will replace this with a node-annotation read (the
-// node-ip-labeler DaemonSet will populate them).
-func (r *ServiceReconciler) publicIPs(ctx context.Context) ([]string, error) {
-	if r.NodeIPsConfigMap == "" {
-		return nil, nil
+// nodePublicIPs lists all schedulable nodes and collects their annotated
+// public IPs (bulb.toturi.tech/public-ipv4, bulb.toturi.tech/public-ipv6).
+// Returns a sorted, deduplicated list.
+func (r *ServiceReconciler) nodePublicIPs(ctx context.Context) ([]string, error) {
+	var nodes corev1.NodeList
+	if err := r.List(ctx, &nodes); err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
 	}
-	var cm corev1.ConfigMap
-	key := types.NamespacedName{Namespace: r.Namespace, Name: r.NodeIPsConfigMap}
-	if err := r.Get(ctx, key, &cm); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
+	seen := make(map[string]struct{})
+	ips := make([]string, 0, len(nodes.Items))
+	for _, node := range nodes.Items {
+		if node.Spec.Unschedulable {
+			continue
 		}
-		return nil, fmt.Errorf("get node-ips configmap: %w", err)
-	}
-	ips := make([]string, 0, len(cm.Data))
-	for _, v := range cm.Data {
-		if v != "" {
-			ips = append(ips, v)
+		for _, ann := range []string{
+			"bulb.toturi.tech/public-ipv4",
+			"bulb.toturi.tech/public-ipv6",
+		} {
+			if ip := node.Annotations[ann]; ip != "" {
+				if _, ok := seen[ip]; !ok {
+					seen[ip] = struct{}{}
+					ips = append(ips, ip)
+				}
+			}
 		}
 	}
 	sort.Strings(ips)
@@ -239,7 +247,78 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&bulbv1alpha1.LBPort{},
 			handler.EnqueueRequestsFromMapFunc(lbPortToService),
 		).
+		Watches(
+			&corev1.Node{},
+			handler.EnqueueRequestsFromMapFunc(nodeToAllServices(r)),
+		).
+		Watches(
+			&corev1.Endpoints{},
+			handler.EnqueueRequestsFromMapFunc(endpointToService),
+		).
 		Complete(r)
+}
+
+func (r *ServiceReconciler) serviceEndpoints(ctx context.Context, svc *corev1.Service) (ServiceEndpoints, error) {
+	if svc.Annotations[AnnotationExternalTrafficPolicy] != "Local" {
+		return nil, nil
+	}
+
+	var eps corev1.Endpoints
+	key := types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
+	if err := r.Get(ctx, key, &eps); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get endpoints %s: %w", key.String(), err)
+	}
+	return endpointsByServicePort(&eps, svc), nil
+}
+
+func endpointsByServicePort(eps *corev1.Endpoints, svc *corev1.Service) ServiceEndpoints {
+	if eps == nil || svc == nil {
+		return nil
+	}
+
+	servicePorts := make(map[string]corev1.Protocol, len(svc.Spec.Ports))
+	for _, p := range svc.Spec.Ports {
+		protocol := p.Protocol
+		if protocol == "" {
+			protocol = corev1.ProtocolTCP
+		}
+		servicePorts[p.Name] = protocol
+	}
+
+	out := make(ServiceEndpoints)
+	seen := make(map[string]map[string]struct{})
+	for _, subset := range eps.Subsets {
+		for _, port := range subset.Ports {
+			protocol, ok := servicePorts[port.Name]
+			if !ok {
+				continue
+			}
+			if port.Protocol != "" && port.Protocol != protocol {
+				continue
+			}
+			if seen[port.Name] == nil {
+				seen[port.Name] = make(map[string]struct{})
+			}
+			for _, addr := range subset.Addresses {
+				if addr.IP == "" {
+					continue
+				}
+				upstream := net.JoinHostPort(addr.IP, fmt.Sprintf("%d", port.Port))
+				if _, ok := seen[port.Name][upstream]; ok {
+					continue
+				}
+				seen[port.Name][upstream] = struct{}{}
+				out[port.Name] = append(out[port.Name], upstream)
+			}
+		}
+	}
+	for name := range out {
+		sort.Strings(out[name])
+	}
+	return out
 }
 
 func servicePredicate() predicate.Predicate {
@@ -260,4 +339,37 @@ func servicePredicate() predicate.Predicate {
 		DeleteFunc:  func(e event.DeleteEvent) bool { return match(e.Object) },
 		GenericFunc: func(e event.GenericEvent) bool { return match(e.Object) },
 	}
+}
+
+func nodeToAllServices(r client.Reader) func(context.Context, client.Object) []ctrl.Request {
+	return func(ctx context.Context, _ client.Object) []ctrl.Request {
+		var svcs corev1.ServiceList
+		if err := r.List(ctx, &svcs); err != nil {
+			return nil
+		}
+		var reqs []ctrl.Request
+		for _, svc := range svcs.Items {
+			if ServiceMatches(&svc) {
+				reqs = append(reqs, ctrl.Request{
+					NamespacedName: types.NamespacedName{
+						Namespace: svc.Namespace,
+						Name:      svc.Name,
+					},
+				})
+			}
+		}
+		return reqs
+	}
+}
+
+func endpointToService(_ context.Context, obj client.Object) []ctrl.Request {
+	if obj == nil {
+		return nil
+	}
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{
+			Namespace: obj.GetNamespace(),
+			Name:      obj.GetName(),
+		},
+	}}
 }
