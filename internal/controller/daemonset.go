@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"net"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -45,7 +46,7 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.Daemo
 	if svc == nil {
 		return nil, errors.New("service is nil")
 	}
-	if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == corev1.ClusterIPNone {
+	if v4, v6 := splitClusterIPs(svc); v4 == "" && v6 == "" {
 		return nil, fmt.Errorf("service %s/%s has no ClusterIP", svc.Namespace, svc.Name)
 	}
 	if len(svc.Spec.Ports) == 0 {
@@ -123,6 +124,8 @@ func DaemonSetName(svc *corev1.Service) string {
 }
 
 func portsAndArgs(svc *corev1.Service) ([]corev1.ContainerPort, []string, error) {
+	v4ClusterIP, v6ClusterIP := splitClusterIPs(svc)
+
 	ports := make([]corev1.ContainerPort, 0, len(svc.Spec.Ports))
 	args := make([]string, 0, len(svc.Spec.Ports))
 	for _, p := range svc.Spec.Ports {
@@ -139,9 +142,43 @@ func portsAndArgs(svc *corev1.Service) ([]corev1.ContainerPort, []string, error)
 			HostPort:      p.Port,
 			Protocol:      corev1.ProtocolTCP,
 		})
-		args = append(args, fmt.Sprintf("--upstream=0.0.0.0:%d=%s:%s", p.Port, svc.Spec.ClusterIP, target))
+		if v4ClusterIP != "" {
+			args = append(args, fmt.Sprintf("--upstream=0.0.0.0:%d=%s:%s", p.Port, v4ClusterIP, target))
+		}
+		if v6ClusterIP != "" {
+			args = append(args, fmt.Sprintf("--upstream=[::]:%d=[%s]:%s", p.Port, v6ClusterIP, target))
+		}
 	}
 	return ports, args, nil
+}
+
+// splitClusterIPs returns the IPv4 and IPv6 ClusterIPs for a Service.
+// It prefers Spec.ClusterIPs (dual-stack); falls back to Spec.ClusterIP.
+// Either return value may be empty if the Service is single-stack.
+func splitClusterIPs(svc *corev1.Service) (v4, v6 string) {
+	candidates := svc.Spec.ClusterIPs
+	if len(candidates) == 0 && svc.Spec.ClusterIP != "" {
+		candidates = []string{svc.Spec.ClusterIP}
+	}
+	for _, raw := range candidates {
+		if raw == "" || raw == corev1.ClusterIPNone {
+			continue
+		}
+		ip := net.ParseIP(raw)
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
+			if v4 == "" {
+				v4 = raw
+			}
+		} else {
+			if v6 == "" {
+				v6 = raw
+			}
+		}
+	}
+	return v4, v6
 }
 
 func portName(p corev1.ServicePort) string {

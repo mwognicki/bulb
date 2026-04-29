@@ -88,11 +88,11 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	dnsRec := BuildDNSRecord(&svc, ips)
-	if err := r.applyDNSRecord(ctx, dnsRec, &svc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("apply dnsrecord: %w", err)
+	dnsRecs := BuildDNSRecords(&svc, ips)
+	if err := r.applyDNSRecords(ctx, dnsRecs, &svc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("apply dnsrecords: %w", err)
 	}
-	logDNSConfig(ctx, &svc, dnsRec)
+	logDNSConfig(ctx, &svc, dnsRecs)
 
 	if err := r.updateStatus(ctx, &svc, ips); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update service status: %w", err)

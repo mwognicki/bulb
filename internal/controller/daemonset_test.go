@@ -237,6 +237,54 @@ func TestBuildDaemonSet_MultiPort(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_DualStackEmitsBothListeners(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Spec.ClusterIPs = []string{"10.96.1.5", "fd00::1"}
+		s.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv4Protocol, corev1.IPv6Protocol}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	wantUpstreams := []string{
+		"--upstream=0.0.0.0:8443=10.96.1.5:8443",
+		"--upstream=[::]:8443=[fd00::1]:8443",
+	}
+	for _, w := range wantUpstreams {
+		if !slices.Contains(args, w) {
+			t.Errorf("missing arg %q in %v", w, args)
+		}
+	}
+	// Single ContainerPort per service port even in dual-stack: hostPort
+	// reservation covers both families.
+	if got := len(ds.Spec.Template.Spec.Containers[0].Ports); got != 1 {
+		t.Fatalf("expected 1 ContainerPort for dual-stack, got %d", got)
+	}
+}
+
+func TestBuildDaemonSet_IPv6OnlyService(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Spec.ClusterIP = "fd00::1"
+		s.Spec.ClusterIPs = []string{"fd00::1"}
+		s.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv6Protocol}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	want := "--upstream=[::]:8443=[fd00::1]:8443"
+	if !slices.Contains(args, want) {
+		t.Errorf("missing %q in %v", want, args)
+	}
+	for _, a := range args {
+		if a == "--upstream=0.0.0.0:8443=fd00::1:8443" {
+			t.Errorf("v6-only service should not produce a 0.0.0.0 listener: %v", args)
+		}
+	}
+}
+
 func TestDaemonSetName(t *testing.T) {
 	got := DaemonSetName(mkSvc())
 	if got != "bulb-demo-echo" {
