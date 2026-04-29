@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -530,6 +531,31 @@ func TestReconcile_PortConflictSetsConditionAndSkipsObjects(t *testing.T) {
 	events := drainEvents(rec)
 	if !hasEventWith(events, "ServicePortConflict") {
 		t.Fatalf("expected ServicePortConflict event, got %v", events)
+	}
+}
+
+func TestReconcile_MetricsSuccessOutcome(t *testing.T) {
+	svc := newSvc(nil)
+	r, _ := newReconciler(t, svc)
+
+	before := testutil.ToFloat64(reconcileTotal.WithLabelValues("success"))
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+	after := testutil.ToFloat64(reconcileTotal.WithLabelValues("success"))
+	if after != before+1 {
+		t.Fatalf("success reconcile metric: got %v want %v", after, before+1)
+	}
+}
+
+func TestReconcile_MetricsPortConflictOutcome(t *testing.T) {
+	svc := namedSvc("demo", "echo", 8443)
+	other := namedSvc("other", "api", 8443)
+	r, _ := newReconciler(t, svc, other)
+
+	before := testutil.ToFloat64(reconcileTotal.WithLabelValues("port_conflict"))
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+	after := testutil.ToFloat64(reconcileTotal.WithLabelValues("port_conflict"))
+	if after != before+1 {
+		t.Fatalf("port_conflict reconcile metric: got %v want %v", after, before+1)
 	}
 }
 

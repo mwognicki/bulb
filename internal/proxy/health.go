@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func startHealthServer(ctx context.Context, addr string, specs []Spec, timeout time.Duration, logger *slog.Logger) (func(), error) {
@@ -18,6 +20,7 @@ func startHealthServer(ctx context.Context, addr string, specs []Spec, timeout t
 	}
 	mux.HandleFunc("/healthz", checker.healthz)
 	mux.HandleFunc("/readyz", checker.readyz)
+	mux.Handle("/metrics", promhttp.Handler())
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

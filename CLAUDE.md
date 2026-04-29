@@ -11,10 +11,10 @@ node annotation based public IP discovery, IPv6, UDP forwarding, PROXY
 protocol, and `externalTrafficPolicy: Local` endpoint routing.
 
 Before adding Helm or optional DNS publishing, tighten the operational
-contract described below. Conflict handling and Service status
-conditions/events and proxy health checks are now present;
-controller/proxy metrics, release automation, and documentation must
-continue to match the code.
+contract described below. Conflict handling, Service status
+conditions/events, proxy health checks, controller/proxy metrics, and
+release automation are now present; documentation must continue to match
+the code.
 
 ## What bulb is
 
@@ -79,7 +79,7 @@ Don't build phase N+1 until N is in production.
 - **Phase 1 — Klipper-clone (MVP). Done.** Controller + per-Service proxy DaemonSets. TCP forwarding works and `loadBalancer.ingress` is now populated from Node annotations rather than the original static ConfigMap design.
 - **Phase 2 — Firewall agent. Mostly done.** `LBPort` CRD + `firewall-agent` DaemonSet. The current agent supports firewalld, iptables, and nftables backends, dry-run mode, policy filtering, status updates, status-writer tests, stale applied-node cleanup, firewall events, and firewall-agent metrics. Controller-side Service/LBPort conflict handling is present; remaining work is mostly broader health/metrics contract polish.
 - **Phase 3 — DNS dry-run. Done, provider publishing deferred.** Controller computes and surfaces the desired DNS configuration per Service using `DNSRecord` CRs — but **no dns-agent, no health checks, no provider integration yet**. Rationale: target clusters are small, static VPS nodes; IP churn is rare. The operator can use the output to configure DNS manually until automated publishing is justified.
-- **Phase 4 — Polish. Mostly done.** UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, and multi-arch-capable Docker builds are present. Release automation and the remaining contract-tightening items still remain.
+- **Phase 4 — Polish. Mostly done.** UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, custom controller/proxy metrics, and multi-arch-capable Docker builds are present. Remaining work is mostly Helm packaging and docs hygiene.
   - Per-node IP discovery is done: `node-ip-labeler` DaemonSet discovers public IPs from the default-route interface and annotates Nodes with `bulb.toturi.tech/public-ipv4` and `bulb.toturi.tech/public-ipv6`. The controller reads node annotations instead of the static ConfigMap. The static `node-ips` ConfigMap is deprecated.
 - **Phase 5 — DNS publishing (optional, deferred).** Provider integrations and active DNS target health checks are intentionally out of the current contract-tightening scope.
 - **Phase 6 (far future, optional).** Replace userspace TCP splice with SO_REUSEPORT + eBPF sockmap or nftables DNAT + conntrack. More DNS providers. kubectl plugin.
@@ -105,13 +105,8 @@ because Helm should package a stable operator contract rather than
 freeze the current rough edges:
 
 1. **Refresh docs continuously.** Keep this file and README aligned with
-   shipped behavior. Remove stale Phase 1/static ConfigMap instructions
-   whenever they reappear.
-2. **Metrics.** Add custom controller/proxy metrics beyond the default
-   controller-runtime metrics: reconcile counts/errors/latency,
-   per-Service active connections, bytes, and upstream dial errors.
-3. **Release path.** Document and automate multi-arch image publishing
-   before Helm references versioned images as an install path.
+   shipped behavior, including release/chart guidance and removal of
+   stale Phase 1/static ConfigMap instructions.
 
 ### Proxy dataplane
 - TCP: accept on `0.0.0.0:<hostPort>`, dial `<ClusterIP>:<targetPort>`, splice both directions, propagate close. Per-connection goroutine; no shared state.
@@ -144,7 +139,7 @@ Concrete implications:
 - DNS records published by `dns-agent` (Phase 5) should respect a short TTL (default 60s) so freshly-issued certs propagate to clients quickly; ACME validation tolerates this.
 
 ### Observability
-- Prometheus metrics on `:9100/metrics` from every component (reconcile counts/errors/latency; per-Service active conns / bytes / dial errors; firewalld ops applied/failed / rule count; DNS API calls/errors/last sync).
+- Prometheus metrics on controller/firewall-agent `:9100/metrics` and proxy `:8081/metrics` (reconcile counts/errors/latency; active conns / bytes / dial errors; UDP sessions/packets; firewalld ops applied/failed / rule count; DNS API calls/errors/last sync).
 - Structured JSON logs via `slog`. One event per significant action; no INFO spam. dns-agent (Phase 5) should use a custom slog handler that redacts known secret keys.
 - Events on the Service object for major transitions (`Reconciled`, `ServicePortConflict`, `LBPortOwnerConflict`, `InvalidAnnotation`, `NoReadyEndpoints`, `FirewallPortOpened`, `DNSTargetWithdrawn` (Phase 5), …).
 

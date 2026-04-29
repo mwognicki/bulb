@@ -226,8 +226,17 @@ Helm is intentionally still missing. Before adding `deploy/helm/bulb/`,
 the project should tighten the operator contract that Helm would package:
 
 - Update docs whenever behavior changes; remove stale Phase 1/static ConfigMap language.
-- Add custom controller/proxy metrics for reconcile outcomes, latency, active connections, bytes, and upstream dial errors.
-- Document and automate multi-arch image publishing.
+
+## Release Automation
+
+Multi-arch image publishing is automated in
+`.github/workflows/release.yml`:
+
+- On tag push matching `v*`, GitHub Actions builds and pushes a
+  multi-arch image (`linux/amd64`, `linux/arm64`) to
+  `ghcr.io/mwognicki/bulb` with semver tags.
+- The same workflow also publishes release binaries and, when a Helm
+  chart exists, packages and publishes the chart.
 
 ## Roadmap
 
@@ -238,8 +247,8 @@ bulb has been built as incremental deployable slices. Current completeness:
 | 1. Klipper-clone MVP | Done | Controller creates per-Service proxy DaemonSets; TCP forwarding works; LoadBalancer ingress is populated from Node annotations rather than the original static ConfigMap design. |
 | 2. Firewall agent | Mostly done | `LBPort` CRD and firewall-agent exist with firewalld, iptables, nftables, dry-run mode, validation, status, events, cleanup, and metrics. Controller-side Service/LBPort conflict detection now surfaces `PortConflict=True`; remaining work is mostly broader health/metrics contract polish. |
 | 3. DNS dry-run | Done | Controller emits `DNSRecord` CRs that describe desired records. Provider publishing is intentionally deferred. |
-| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, proxy health probes, `keep-on-uninstall`, and multi-arch-capable Docker builds are present. Local endpoint routing intentionally uses core `Endpoints`, not EndpointSlices. Remaining polish is metrics and release automation. |
-| 5. Packaging and contract hardening | Not started | Next practical focus: controller/proxy metrics, release automation, then Helm. |
+| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, proxy health probes, `keep-on-uninstall`, custom controller/proxy metrics, and multi-arch-capable Docker builds are present. Local endpoint routing intentionally uses core `Endpoints`, not EndpointSlices. |
+| 5. Packaging and contract hardening | Not started | Next practical focus: Helm packaging. |
 
 ## Building
 

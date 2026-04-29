@@ -133,6 +133,8 @@ type ServeOptions struct {
 // in-flight TCP connections have finished or the drain timeout elapsed.
 // UDP sessions tear down on idle timeout regardless.
 func Serve(ctx context.Context, specs []Spec, opts ServeOptions, logger *slog.Logger) error {
+	initMetrics()
+
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
@@ -267,11 +269,14 @@ var endpointCounters sync.Map
 
 func handle(ctx context.Context, client net.Conn, spec Spec, logger *slog.Logger) {
 	defer client.Close()
+	tcpActiveConnections.WithLabelValues(spec.Listen).Inc()
+	defer tcpActiveConnections.WithLabelValues(spec.Listen).Dec()
 
 	upstream := upstreamFor(spec)
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	server, err := dialer.DialContext(ctx, "tcp", upstream)
 	if err != nil {
+		upstreamDialFailures.WithLabelValues(string(ProtocolTCP), spec.Listen).Inc()
 		logger.Error("upstream dial failed", "upstream", upstream, "err", err.Error())
 		return
 	}
@@ -291,7 +296,7 @@ func handle(ctx context.Context, client net.Conn, spec Spec, logger *slog.Logger
 		}
 	}
 
-	splice(client, server)
+	splice(client, server, spec.Listen)
 }
 
 // upstreamFor returns the ClusterIP upstream or the next endpoint hostport.
@@ -317,23 +322,23 @@ func (c *atomicCounter) Inc() uint64 {
 
 // splice copies bytes in both directions and propagates half-close so
 // upstream/downstream can each signal EOF independently.
-func splice(a, b net.Conn) {
+func splice(a, b net.Conn, listen string) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		copyAndCloseWrite(a, b)
+		copyAndCloseWrite(a, b, ProtocolTCP, "upstream_to_client", listen)
 	}()
 	go func() {
 		defer wg.Done()
-		copyAndCloseWrite(b, a)
+		copyAndCloseWrite(b, a, ProtocolTCP, "client_to_upstream", listen)
 	}()
 	wg.Wait()
 }
 
 // copyAndCloseWrite copies src→dst and then half-closes dst's write side.
 // Both directions running concurrently propagate EOF correctly.
-func copyAndCloseWrite(dst, src net.Conn) {
+func copyAndCloseWrite(dst, src net.Conn, protocol Protocol, direction, listen string) {
 	type closeWriter interface{ CloseWrite() error }
 	defer func() {
 		if cw, ok := dst.(closeWriter); ok {
@@ -342,17 +347,22 @@ func copyAndCloseWrite(dst, src net.Conn) {
 	}()
 	buf := bufPool.Get().(*[]byte)
 	defer bufPool.Put(buf)
-	_, _ = copyBuffer(dst, src, *buf)
+	_, _ = copyBuffer(dst, src, *buf, func(n int) {
+		forwardedBytes.WithLabelValues(string(protocol), direction, listen).Add(float64(n))
+	})
 }
 
 // copyBuffer is a thin wrapper around io.CopyBuffer kept for testability.
-func copyBuffer(dst net.Conn, src net.Conn, buf []byte) (int64, error) {
+func copyBuffer(dst net.Conn, src net.Conn, buf []byte, onWrite func(int)) (int64, error) {
 	var written int64
 	for {
 		n, rerr := src.Read(buf)
 		if n > 0 {
 			w, werr := dst.Write(buf[:n])
 			written += int64(w)
+			if onWrite != nil && w > 0 {
+				onWrite(w)
+			}
 			if werr != nil {
 				return written, werr
 			}

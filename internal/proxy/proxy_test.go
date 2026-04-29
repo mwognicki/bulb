@@ -196,6 +196,10 @@ func TestServe_HealthEndpointsReadyWhenTCPUpstreamReachable(t *testing.T) {
 	if got := getHTTPStatusUntilReady(t, "http://"+healthAddr+"/readyz", time.Second); got != http.StatusOK {
 		t.Fatalf("/readyz: got %d want 200", got)
 	}
+	body := getHTTPBodyUntilReady(t, "http://"+healthAddr+"/metrics", time.Second)
+	if !strings.Contains(body, "bulb_proxy_tcp_active_connections") {
+		t.Fatalf("/metrics missing proxy metrics, got %q", body)
+	}
 
 	cancel()
 	select {
@@ -416,6 +420,29 @@ func getHTTPStatusUntilReady(t *testing.T, url string, within time.Duration) int
 	}
 	t.Fatalf("HTTP endpoint never came up at %s: %v", url, lastErr)
 	return 0
+}
+
+func getHTTPBodyUntilReady(t *testing.T, url string, within time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			body, rerr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if rerr == nil && resp.StatusCode == http.StatusOK {
+				return string(body)
+			}
+			lastErr = rerr
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		lastErr = err
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("HTTP endpoint body never became readable at %s: %v", url, lastErr)
+	return ""
 }
 
 func readAll(t *testing.T, r io.Reader, n int) string {

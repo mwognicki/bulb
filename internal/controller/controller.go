@@ -40,6 +40,7 @@ func Run(args []string) error {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bulbv1alpha1.AddToScheme(scheme))
+	initMetrics()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 

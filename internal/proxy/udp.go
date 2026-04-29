@@ -69,6 +69,7 @@ func (f *udpForwarder) run(ctx context.Context) {
 
 		sess, err := f.getOrCreate(clientAddr)
 		if err != nil {
+			upstreamDialFailures.WithLabelValues(string(ProtocolUDP), f.spec.Listen).Inc()
 			f.logger.Error("udp upstream dial failed", "upstream", f.spec.Upstream, "client", clientAddr.String(), "err", err.Error())
 			continue
 		}
@@ -77,6 +78,9 @@ func (f *udpForwarder) run(ctx context.Context) {
 		if _, werr := sess.upstream.Write(buf[:n]); werr != nil {
 			f.logger.Error("udp upstream write failed", "upstream", f.spec.Upstream, "err", werr.Error())
 			f.dropSession(clientAddr.String())
+		} else {
+			udpPackets.WithLabelValues("client_to_upstream", f.spec.Listen).Inc()
+			forwardedBytes.WithLabelValues(string(ProtocolUDP), "client_to_upstream", f.spec.Listen).Add(float64(n))
 		}
 	}
 }
@@ -115,6 +119,7 @@ func (f *udpForwarder) getOrCreate(clientAddr net.Addr) (*udpSession, error) {
 		return existing, nil
 	}
 	f.sessions[key] = sess
+	udpActiveSessions.WithLabelValues(f.spec.Listen).Inc()
 	f.mu.Unlock()
 
 	go f.upstreamReadLoop(sess, key)
@@ -140,6 +145,8 @@ func (f *udpForwarder) upstreamReadLoop(sess *udpSession, key string) {
 			f.dropSession(key)
 			return
 		}
+		udpPackets.WithLabelValues("upstream_to_client", f.spec.Listen).Inc()
+		forwardedBytes.WithLabelValues(string(ProtocolUDP), "upstream_to_client", f.spec.Listen).Add(float64(n))
 	}
 }
 
@@ -190,6 +197,7 @@ func (f *udpForwarder) dropSession(key string) {
 	}
 	sess.closeOnce.Do(func() {
 		_ = sess.upstream.Close()
+		udpActiveSessions.WithLabelValues(f.spec.Listen).Dec()
 	})
 }
 
