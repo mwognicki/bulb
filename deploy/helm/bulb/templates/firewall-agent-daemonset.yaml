@@ -1,0 +1,101 @@
+{{- $validBackends := list "firewalld" "iptables" "nftables" -}}
+{{- if not (has .Values.firewall.backend $validBackends) -}}
+  {{- fail (printf "firewall.backend must be one of firewalld, iptables, nftables; got %q" .Values.firewall.backend) -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: bulb-firewall-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: firewall-agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "bulb.selectorLabels" (dict "component" "firewall-agent" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bulb.selectorLabels" (dict "component" "firewall-agent" "root" .) | nindent 8 }}
+    spec:
+      hostNetwork: true
+      serviceAccountName: bulb-firewall-agent
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: firewall-agent
+          image: {{ include "bulb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+            {{- with .Values.firewallAgent.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          args:
+            - firewall-agent
+            - --node-name=$(NODE_NAME)
+            - --config-namespace={{ .Values.namespace }}
+            - --configmap=bulb-firewall-agent
+            - --metrics-bind-address=:9100
+            - --health-probe-bind-address=:8081
+          {{- if eq .Values.firewall.backend "firewalld" }}
+          volumeMounts:
+            - name: dbus-socket
+              mountPath: /run/dbus/system_bus_socket
+            - name: state-dir
+              mountPath: /var/lib/bulb
+          {{- else }}
+          volumeMounts:
+            - name: state-dir
+              mountPath: /var/lib/bulb
+          {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 9100
+              protocol: TCP
+            - name: probes
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.firewallAgent.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: true
+            capabilities:
+              drop: ["ALL"]
+      {{- if eq .Values.firewall.backend "firewalld" }}
+      volumes:
+        - name: dbus-socket
+          hostPath:
+            path: /run/dbus/system_bus_socket
+            type: Socket
+        - name: state-dir
+          hostPath:
+            path: /var/lib/bulb
+            type: DirectoryOrCreate
+      {{- else }}
+      volumes:
+        - name: state-dir
+          hostPath:
+            path: /var/lib/bulb
+            type: DirectoryOrCreate
+      {{- end }}

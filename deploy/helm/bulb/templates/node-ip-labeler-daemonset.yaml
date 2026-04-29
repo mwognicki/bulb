@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: bulb-node-ip-labeler
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-ip-labeler
+spec:
+  selector:
+    matchLabels:
+      {{- include "bulb.selectorLabels" (dict "component" "node-ip-labeler" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bulb.selectorLabels" (dict "component" "node-ip-labeler" "root" .) | nindent 8 }}
+    spec:
+      hostNetwork: true
+      serviceAccountName: bulb-node-ip-labeler
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: labeler
+          image: {{ include "bulb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+            {{- with .Values.nodeIpLabeler.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          args:
+            - node-ip-labeler
+            - --node-name=$(NODE_NAME)
+            - --interval={{ .Values.nodeIpLabeler.interval }}
+          resources:
+            {{- toYaml .Values.nodeIpLabeler.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
