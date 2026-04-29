@@ -128,6 +128,7 @@ Expected reconciled objects:
 - The controller creates a per-Service DaemonSet in `bulb-system`.
 - The controller also creates one cluster-scoped `LBPort` object per exposed Service port.
 - That DaemonSet schedules one proxy pod per eligible node.
+- Proxy pods expose HTTP probes on `:8081`: `/healthz` after listeners bind, and `/readyz` after TCP upstreams are reachable. UDP-only Services become ready once listeners bind because there is no generic safe UDP upstream probe.
 - The node-ip-labeler annotates Nodes with `bulb.toturi.tech/public-ipv4` and, when available, `bulb.toturi.tech/public-ipv6`.
 - The `echo` Service gets `status.loadBalancer.ingress` values from those Node annotations.
 
@@ -225,7 +226,6 @@ Helm is intentionally still missing. Before adding `deploy/helm/bulb/`,
 the project should tighten the operator contract that Helm would package:
 
 - Update docs whenever behavior changes; remove stale Phase 1/static ConfigMap language.
-- Define and implement the proxy health contract: listener liveness plus upstream readiness where possible, including a clear UDP-only behavior.
 - Add custom controller/proxy metrics for reconcile outcomes, latency, active connections, bytes, and upstream dial errors.
 - Either implement `bulb.toturi.tech/keep-on-uninstall` or remove it from the documented annotation contract.
 - Decide whether Local endpoint routing should stay on core `Endpoints` or move to EndpointSlices, then align RBAC and docs.
@@ -240,8 +240,8 @@ bulb has been built as incremental deployable slices. Current completeness:
 | 1. Klipper-clone MVP | Done | Controller creates per-Service proxy DaemonSets; TCP forwarding works; LoadBalancer ingress is populated from Node annotations rather than the original static ConfigMap design. |
 | 2. Firewall agent | Mostly done | `LBPort` CRD and firewall-agent exist with firewalld, iptables, nftables, dry-run mode, validation, status, events, cleanup, and metrics. Controller-side Service/LBPort conflict detection now surfaces `PortConflict=True`; remaining work is mostly broader health/metrics contract polish. |
 | 3. DNS dry-run | Done | Controller emits `DNSRecord` CRs that describe desired records. Provider publishing is intentionally deferred. |
-| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, and multi-arch-capable Docker builds are present. Remaining polish is health, metrics, annotation truthfulness, Endpoint API choice, and release automation. |
-| 5. Packaging and contract hardening | Not started | Next practical focus: proxy health checks, controller/proxy metrics, release automation, then Helm. |
+| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, proxy health probes, and multi-arch-capable Docker builds are present. Remaining polish is metrics, annotation truthfulness, Endpoint API choice, and release automation. |
+| 5. Packaging and contract hardening | Not started | Next practical focus: controller/proxy metrics, release automation, then Helm. |
 
 ## Building
 

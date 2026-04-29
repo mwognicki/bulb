@@ -37,6 +37,8 @@ func Run(args []string) error {
 	fs.Var(&udpPairs, "udp-upstream", "UDP listen=upstream pair, e.g. 0.0.0.0:53=10.96.1.5:53 (repeatable)")
 	drain := fs.Duration("drain-timeout", 30*time.Second, "max time to wait for in-flight connections after SIGTERM")
 	udpIdle := fs.Duration("udp-idle-timeout", 30*time.Second, "tear down UDP session after this much silence on both sides")
+	healthAddr := fs.String("health-bind-address", ":8081", "address the proxy liveness/readiness endpoint binds to; empty disables it")
+	healthTimeout := fs.Duration("health-check-timeout", 250*time.Millisecond, "timeout for TCP upstream readiness checks")
 	proxyProto := fs.String("proxy-protocol", "", "PROXY protocol version to emit upstream: v1, v2, or empty for none")
 	var endpointPairs multiFlag
 	fs.Var(&endpointPairs, "endpoint", "endpoint upstreams for a listen port, e.g. 0.0.0.0:8080=10.244.1.2:8080,10.244.1.3:8080 (repeatable)")
@@ -83,7 +85,12 @@ func Run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	return Serve(ctx, specs, ServeOptions{DrainTimeout: *drain, UDPIdleTimeout: *udpIdle}, logger)
+	return Serve(ctx, specs, ServeOptions{
+		DrainTimeout:       *drain,
+		UDPIdleTimeout:     *udpIdle,
+		HealthBindAddress:  *healthAddr,
+		HealthCheckTimeout: *healthTimeout,
+	}, logger)
 }
 
 // Protocol identifies the wire protocol of a Spec.
@@ -114,6 +121,11 @@ type ServeOptions struct {
 	// UDPIdleTimeout tears down a per-client UDP session after this much
 	// silence in both directions. Default 30s.
 	UDPIdleTimeout time.Duration
+	// HealthBindAddress exposes /healthz and /readyz when non-empty.
+	// Run defaults this to :8081; direct Serve callers can leave it empty.
+	HealthBindAddress string
+	// HealthCheckTimeout caps each TCP upstream readiness dial. Default 250ms.
+	HealthCheckTimeout time.Duration
 }
 
 // Serve binds every spec, accepts (TCP) or reads (UDP), and forwards to
@@ -129,6 +141,9 @@ func Serve(ctx context.Context, specs []Spec, opts ServeOptions, logger *slog.Lo
 	}
 	if opts.UDPIdleTimeout <= 0 {
 		opts.UDPIdleTimeout = 30 * time.Second
+	}
+	if opts.HealthCheckTimeout <= 0 {
+		opts.HealthCheckTimeout = 250 * time.Millisecond
 	}
 
 	var (
@@ -168,6 +183,14 @@ func Serve(ctx context.Context, specs []Spec, opts ServeOptions, logger *slog.Lo
 			closeAllOpened()
 			return fmt.Errorf("unsupported protocol %q on %s", spec.Protocol, spec.Listen)
 		}
+	}
+	if opts.HealthBindAddress != "" {
+		stopHealth, err := startHealthServer(ctx, opts.HealthBindAddress, specs, opts.HealthCheckTimeout, logger)
+		if err != nil {
+			closeAllOpened()
+			return err
+		}
+		defer stopHealth()
 	}
 
 	acceptCtx, cancelAccept := context.WithCancel(ctx)

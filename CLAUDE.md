@@ -12,9 +12,9 @@ protocol, and `externalTrafficPolicy: Local` endpoint routing.
 
 Before adding Helm or optional DNS publishing, tighten the operational
 contract described below. Conflict handling and Service status
-conditions/events are now present; proxy health checks, controller/proxy
-metrics, annotation truthfulness, release automation, and documentation
-must continue to match the code.
+conditions/events and proxy health checks are now present;
+controller/proxy metrics, annotation truthfulness, release automation,
+and documentation must continue to match the code.
 
 ## What bulb is
 
@@ -107,29 +107,24 @@ freeze the current rough edges:
 1. **Refresh docs continuously.** Keep this file and README aligned with
    shipped behavior. Remove stale Phase 1/static ConfigMap instructions
    whenever they reappear.
-2. **Proxy health contract.** Replace the current basic TCP socket
-   readiness probe with an explicit proxy health/readiness surface:
-   liveness should prove listeners are alive, and readiness should
-   reflect upstream reachability where possible. Define acceptable
-   behavior for UDP-only Services.
-3. **Metrics.** Add custom controller/proxy metrics beyond the default
+2. **Metrics.** Add custom controller/proxy metrics beyond the default
    controller-runtime metrics: reconcile counts/errors/latency,
    per-Service active connections, bytes, and upstream dial errors.
-4. **Annotation truthfulness.** Either implement
+3. **Annotation truthfulness.** Either implement
    `bulb.toturi.tech/keep-on-uninstall` or remove it from the public
    contract. Today it is documented but not wired into behavior.
-5. **Endpoints API decision.** The Local policy implementation currently
+4. **Endpoints API decision.** The Local policy implementation currently
    uses core `Endpoints`; either move to EndpointSlices or update the
    security/RBAC documentation to bless `Endpoints` for this small-cluster
    design.
-6. **Release path.** Document and automate multi-arch image publishing
+5. **Release path.** Document and automate multi-arch image publishing
    before Helm references versioned images as an install path.
 
 ### Proxy dataplane
 - TCP: accept on `0.0.0.0:<hostPort>`, dial `<ClusterIP>:<targetPort>`, splice both directions, propagate close. Per-connection goroutine; no shared state.
 - UDP (Phase 4): per-(client-addr, port) upstream socket, idle timeout default 30s.
 - PROXY protocol v1/v2 emission upstream (annotation-driven).
-- Liveness: TCP self-test on each listening port. Readiness: ClusterIP reachable.
+- Health: proxy pods expose HTTP probes on `:8081`. `/healthz` is live after all configured TCP/UDP listeners are bound. `/readyz` dials TCP upstreams with a short timeout, using Local endpoints when configured; UDP-only Services are ready once their listeners are bound because probing UDP upstreams would require application traffic.
 - SIGTERM: stop accepting, drain up to `terminationGracePeriodSeconds` (default 30s), exit.
 
 ### Firewall coordination
