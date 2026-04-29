@@ -293,6 +293,23 @@ func TestBuildDaemonSet_MultiPort(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_LocalExternalTrafficPolicyAddsEndpoints(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationExternalTrafficPolicy: "Local"}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system", ServiceEndpoints{
+		"https": {"10.244.1.7:9443", "10.244.1.8:9443", "[fd00::7]:9443"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	want := "--endpoint=0.0.0.0:8443=10.244.1.7:9443,10.244.1.8:9443"
+	if !slices.Contains(args, want) {
+		t.Fatalf("missing endpoint arg %q in %v", want, args)
+	}
+}
+
 func TestBuildDaemonSet_DualStackEmitsBothListeners(t *testing.T) {
 	svc := mkSvc(func(s *corev1.Service) {
 		s.Spec.ClusterIPs = []string{"10.96.1.5", "fd00::1"}
@@ -316,6 +333,30 @@ func TestBuildDaemonSet_DualStackEmitsBothListeners(t *testing.T) {
 	// reservation covers both families.
 	if got := len(ds.Spec.Template.Spec.Containers[0].Ports); got != 1 {
 		t.Fatalf("expected 1 ContainerPort for dual-stack, got %d", got)
+	}
+}
+
+func TestBuildDaemonSet_LocalExternalTrafficPolicyDualStackEndpoints(t *testing.T) {
+	svc := mkSvc(func(s *corev1.Service) {
+		s.Annotations = map[string]string{AnnotationExternalTrafficPolicy: "Local"}
+		s.Spec.ClusterIPs = []string{"10.96.1.5", "fd00::1"}
+		s.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv4Protocol, corev1.IPv6Protocol}
+	})
+	ds, err := BuildDaemonSet(svc, "img", "bulb-system", ServiceEndpoints{
+		"https": {"10.244.1.7:9443", "[fd00::7]:9443"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	wants := []string{
+		"--endpoint=0.0.0.0:8443=10.244.1.7:9443",
+		"--endpoint=[::]:8443=[fd00::7]:9443",
+	}
+	for _, w := range wants {
+		if !slices.Contains(args, w) {
+			t.Errorf("missing %q in %v", w, args)
+		}
 	}
 }
 

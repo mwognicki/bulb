@@ -41,10 +41,40 @@ func TestParsePair(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got != tc.want {
+			if got.Listen != tc.want.Listen || got.Upstream != tc.want.Upstream || got.Protocol != tc.want.Protocol {
 				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseEndpointPairs(t *testing.T) {
+	got, err := parseEndpointPairs([]string{
+		"0.0.0.0:8443=10.244.1.7:9443,10.244.1.8:9443",
+		"[::]:8443=[fd00::7]:9443",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got["0.0.0.0:8443"]) != 2 || got["0.0.0.0:8443"][0] != "10.244.1.7:9443" {
+		t.Fatalf("unexpected v4 endpoints: %+v", got)
+	}
+	if len(got["[::]:8443"]) != 1 || got["[::]:8443"][0] != "[fd00::7]:9443" {
+		t.Fatalf("unexpected v6 endpoints: %+v", got)
+	}
+}
+
+func TestUpstreamForRoundRobinsEndpoints(t *testing.T) {
+	spec := Spec{
+		Listen:    "127.0.0.1:8443",
+		Upstream:  "10.96.1.5:8443",
+		Endpoints: []string{"10.244.1.7:9443", "10.244.1.8:9443"},
+	}
+	if got := upstreamFor(spec); got != "10.244.1.7:9443" {
+		t.Fatalf("first upstream: got %q", got)
+	}
+	if got := upstreamFor(spec); got != "10.244.1.8:9443" {
+		t.Fatalf("second upstream: got %q", got)
 	}
 }
 
@@ -264,7 +294,7 @@ func startProxyProtocolUpstream(t *testing.T) (addr string, rxHeader <-chan stri
 				buf := make([]byte, 1024)
 				readBytes := 0
 				for {
-					n, err := c.Read(buf[readBytes:readBytes+1])
+					n, err := c.Read(buf[readBytes : readBytes+1])
 					if err != nil {
 						return
 					}
@@ -305,8 +335,8 @@ func TestProxyProtocolV1(t *testing.T) {
 
 	listenAddr := freeAddr(t)
 	specs := []Spec{{
-		Listen:       listenAddr,
-		Upstream:     upstreamAddr,
+		Listen:        listenAddr,
+		Upstream:      upstreamAddr,
 		ProxyProtocol: ProxyProtocolVersion1,
 	}}
 
@@ -368,8 +398,8 @@ func TestProxyProtocolV2_Integration(t *testing.T) {
 
 	listenAddr := freeAddr(t)
 	specs := []Spec{{
-		Listen:       listenAddr,
-		Upstream:     upstream,
+		Listen:        listenAddr,
+		Upstream:      upstream,
 		ProxyProtocol: ProxyProtocolVersion2,
 	}}
 
@@ -421,8 +451,8 @@ func TestProxyProtocolNone(t *testing.T) {
 
 	listenAddr := freeAddr(t)
 	specs := []Spec{{
-		Listen:       listenAddr,
-		Upstream:     upstream,
+		Listen:        listenAddr,
+		Upstream:      upstream,
 		ProxyProtocol: "",
 	}}
 

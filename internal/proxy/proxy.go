@@ -13,7 +13,9 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -23,8 +25,8 @@ type ProxyProtocolVersion string
 
 const (
 	ProxyProtocolVersionNone = ProxyProtocolVersion("")
-	ProxyProtocolVersion1   = ProxyProtocolVersion("1")
-	ProxyProtocolVersion2   = ProxyProtocolVersion("2")
+	ProxyProtocolVersion1    = ProxyProtocolVersion("1")
+	ProxyProtocolVersion2    = ProxyProtocolVersion("2")
 )
 
 // Run is the `bulb proxy` subcommand entrypoint.
@@ -36,6 +38,8 @@ func Run(args []string) error {
 	drain := fs.Duration("drain-timeout", 30*time.Second, "max time to wait for in-flight connections after SIGTERM")
 	udpIdle := fs.Duration("udp-idle-timeout", 30*time.Second, "tear down UDP session after this much silence on both sides")
 	proxyProto := fs.String("proxy-protocol", "", "PROXY protocol version to emit upstream: v1, v2, or empty for none")
+	var endpointPairs multiFlag
+	fs.Var(&endpointPairs, "endpoint", "endpoint upstreams for a listen port, e.g. 0.0.0.0:8080=10.244.1.2:8080,10.244.1.3:8080 (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -58,8 +62,21 @@ func Run(args []string) error {
 	}
 	specs = append(specs, udpSpecs...)
 
+	// Apply proxy protocol to all specs
 	for i := range specs {
 		specs[i].ProxyProtocol = proxyProtocol
+	}
+
+	// Parse endpoint pairs and match them with upstream specs
+	endpointMap, err := parseEndpointPairs(endpointPairs)
+	if err != nil {
+		return fmt.Errorf("parse endpoints: %w", err)
+	}
+	// Apply endpoints to matching specs
+	for i := range specs {
+		if endpoints, ok := endpointMap[specs[i].Listen]; ok {
+			specs[i].Endpoints = endpoints
+		}
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -80,10 +97,13 @@ const (
 // Spec is a single listen=upstream forwarding rule. Protocol defaults to
 // TCP when empty.
 type Spec struct {
-	Listen       string
-	Upstream     string
-	Protocol     Protocol
+	Listen        string
+	Upstream      string
+	Protocol      Protocol
 	ProxyProtocol ProxyProtocolVersion
+	// Endpoints is used when externalTrafficPolicy is Local. If non-empty,
+	// the proxy dials these endpoint hostports instead of the ClusterIP.
+	Endpoints []string
 }
 
 // ServeOptions tunes Serve. Zero values are sensible defaults.
@@ -115,7 +135,7 @@ func Serve(ctx context.Context, specs []Spec, opts ServeOptions, logger *slog.Lo
 		tcpListeners []net.Listener
 		tcpSpecs     []Spec
 		udpConns     []net.PacketConn
-		udpUpstreams []string
+		udpSpecs     []Spec
 		conns        sync.WaitGroup
 	)
 	closeAllOpened := func() {
@@ -142,8 +162,8 @@ func Serve(ctx context.Context, specs []Spec, opts ServeOptions, logger *slog.Lo
 				return fmt.Errorf("listen udp %s: %w", spec.Listen, err)
 			}
 			udpConns = append(udpConns, pc)
-			udpUpstreams = append(udpUpstreams, spec.Upstream)
-			logger.Info("listening", "proto", "udp", "addr", pc.LocalAddr().String(), "upstream", spec.Upstream)
+			udpSpecs = append(udpSpecs, spec)
+			logger.Info("listening", "proto", "udp", "addr", pc.LocalAddr().String(), "upstream", spec.Upstream, "endpoints", spec.Endpoints)
 		default:
 			closeAllOpened()
 			return fmt.Errorf("unsupported protocol %q on %s", spec.Protocol, spec.Listen)
@@ -163,7 +183,7 @@ func Serve(ctx context.Context, specs []Spec, opts ServeOptions, logger *slog.Lo
 	}
 	udpForwarders := make([]*udpForwarder, 0, len(udpConns))
 	for i, pc := range udpConns {
-		f := newUDPForwarder(pc, udpUpstreams[i], opts.UDPIdleTimeout, logger)
+		f := newUDPForwarder(pc, udpSpecs[i], opts.UDPIdleTimeout, logger)
 		udpForwarders = append(udpForwarders, f)
 		accepts.Add(1)
 		go func(f *udpForwarder) {
@@ -218,13 +238,18 @@ func acceptLoop(ctx context.Context, l net.Listener, spec Spec, conns *sync.Wait
 	}
 }
 
+// endpointCounter tracks the next endpoint index to use for round-robin.
+// Key is the listen address.
+var endpointCounters sync.Map
+
 func handle(ctx context.Context, client net.Conn, spec Spec, logger *slog.Logger) {
 	defer client.Close()
 
+	upstream := upstreamFor(spec)
 	dialer := net.Dialer{Timeout: 5 * time.Second}
-	server, err := dialer.DialContext(ctx, "tcp", spec.Upstream)
+	server, err := dialer.DialContext(ctx, "tcp", upstream)
 	if err != nil {
-		logger.Error("upstream dial failed", "upstream", spec.Upstream, "err", err.Error())
+		logger.Error("upstream dial failed", "upstream", upstream, "err", err.Error())
 		return
 	}
 	defer server.Close()
@@ -238,12 +263,33 @@ func handle(ctx context.Context, client net.Conn, spec Spec, logger *slog.Logger
 	// Write PROXY protocol header if configured
 	if spec.ProxyProtocol != "" {
 		if err := writeProxyHeader(client, server, spec.ProxyProtocol, logger); err != nil {
-			logger.Error("failed to write PROXY header", "upstream", spec.Upstream, "err", err.Error())
+			logger.Error("failed to write PROXY header", "upstream", upstream, "err", err.Error())
 			return
 		}
 	}
 
 	splice(client, server)
+}
+
+// upstreamFor returns the ClusterIP upstream or the next endpoint hostport.
+func upstreamFor(spec Spec) string {
+	if len(spec.Endpoints) == 0 {
+		return spec.Upstream
+	}
+	key := string(spec.protocol()) + ":" + spec.Listen
+	val, _ := endpointCounters.LoadOrStore(key, &atomicCounter{})
+	counter := val.(*atomicCounter)
+	idx := counter.Inc() % uint64(len(spec.Endpoints))
+	return spec.Endpoints[idx]
+}
+
+// atomicCounter is a thread-safe counter.
+type atomicCounter struct {
+	count uint64
+}
+
+func (c *atomicCounter) Inc() uint64 {
+	return atomic.AddUint64(&c.count, 1) - 1
 }
 
 // splice copies bytes in both directions and propagates half-close so
@@ -437,6 +483,43 @@ func parsePairsWithProtocol(raw []string, proto Protocol) ([]Spec, error) {
 		specs = append(specs, spec)
 	}
 	return specs, nil
+}
+
+// parseEndpointPairs parses --endpoint flags like
+// "0.0.0.0:8080=10.244.1.2:8080,10.244.1.3:8080" or
+// "[::]:80=[2001:db8::1]:80" and returns listen address -> endpoint hostports.
+func parseEndpointPairs(raw []string) (map[string][]string, error) {
+	result := make(map[string][]string)
+	for _, r := range raw {
+		idx := strings.IndexByte(r, '=')
+		if idx < 0 {
+			return nil, fmt.Errorf("invalid endpoint pair %q: expected listen=endpoints[,...]", r)
+		}
+		listen, endpoints := r[:idx], r[idx+1:]
+		if listen == "" || endpoints == "" {
+			return nil, fmt.Errorf("invalid endpoint pair %q: empty listen or endpoints", r)
+		}
+		if _, _, err := net.SplitHostPort(listen); err != nil {
+			return nil, fmt.Errorf("invalid listen %q in endpoint pair: %w", listen, err)
+		}
+		rawEndpoints := strings.Split(endpoints, ",")
+		filtered := make([]string, 0, len(rawEndpoints))
+		for _, endpoint := range rawEndpoints {
+			trimmed := strings.TrimSpace(endpoint)
+			if trimmed == "" {
+				continue
+			}
+			if _, _, err := net.SplitHostPort(trimmed); err != nil {
+				return nil, fmt.Errorf("invalid endpoint %q in endpoint pair: %w", trimmed, err)
+			}
+			filtered = append(filtered, trimmed)
+		}
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("invalid endpoint pair %q: no endpoints", r)
+		}
+		result[listen] = filtered
+	}
+	return result, nil
 }
 
 func parsePair(s string) (Spec, error) {

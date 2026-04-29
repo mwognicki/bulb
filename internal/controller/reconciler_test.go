@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -201,6 +202,32 @@ func TestReconcile_CreatesDaemonSetForEmptyClass(t *testing.T) {
 	}
 }
 
+func TestReconcile_LocalExternalTrafficPolicyPassesReadyEndpoints(t *testing.T) {
+	svc := newSvc(nil)
+	svc.Annotations = map[string]string{AnnotationExternalTrafficPolicy: "Local"}
+	eps := &corev1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Namespace: svc.Namespace, Name: svc.Name},
+		Subsets: []corev1.EndpointSubset{{
+			Addresses:         []corev1.EndpointAddress{{IP: "10.244.1.8"}, {IP: "10.244.1.7"}},
+			NotReadyAddresses: []corev1.EndpointAddress{{IP: "10.244.1.9"}},
+			Ports:             []corev1.EndpointPort{{Name: "https", Port: 9443, Protocol: corev1.ProtocolTCP}},
+		}},
+	}
+	r, c := newReconciler(t, svc, eps)
+
+	reconcileOnce(t, r, svc.Namespace, svc.Name)
+
+	var ds appsv1.DaemonSet
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "bulb-system", Name: "bulb-demo-echo"}, &ds); err != nil {
+		t.Fatalf("expected DaemonSet to exist: %v", err)
+	}
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	want := "--endpoint=0.0.0.0:8443=10.244.1.7:9443,10.244.1.8:9443"
+	if !slices.Contains(args, want) {
+		t.Fatalf("missing endpoint arg %q in %v", want, args)
+	}
+}
+
 func TestReconcile_IgnoresOtherClass(t *testing.T) {
 	cls := "metallb"
 	svc := newSvc(&cls)
@@ -233,15 +260,15 @@ func TestReconcile_PopulatesStatusIngressFromNodeAnnotations(t *testing.T) {
 	svc := newSvc(nil)
 	nodes := []client.Object{
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
-			Name: "node-a",
+			Name:        "node-a",
 			Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.10"},
 		}},
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
-			Name: "node-b",
+			Name:        "node-b",
 			Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.11"},
 		}},
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
-			Name: "node-c",
+			Name:        "node-c",
 			Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.12"},
 		}},
 	}
@@ -283,12 +310,12 @@ func TestReconcile_SkipsUnschedulableNodesForIPs(t *testing.T) {
 	svc := newSvc(nil)
 	nodes := []client.Object{
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
-			Name: "node-a",
+			Name:        "node-a",
 			Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.10"},
 		}},
 		&corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "node-b",
+				Name:        "node-b",
 				Annotations: map[string]string{"bulb.toturi.tech/public-ipv4": "203.0.113.11"},
 			},
 			Spec: corev1.NodeSpec{Unschedulable: true},

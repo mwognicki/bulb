@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 
 	bulbv1alpha1 "github.com/mwognicki/bulb/api/v1alpha1"
@@ -40,6 +41,7 @@ type ServiceReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=services/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=endpoints,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile implements the controller-runtime Reconciler interface.
@@ -61,7 +63,11 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return r.cleanupByName(ctx, svc.Namespace, svc.Name)
 	}
 
-	desired, err := BuildDaemonSet(&svc, r.Image, r.Namespace)
+	endpoints, err := r.serviceEndpoints(ctx, &svc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("read service endpoints: %w", err)
+	}
+	desired, err := BuildDaemonSet(&svc, r.Image, r.Namespace, endpoints)
 	if err != nil {
 		logger.Error(err, "build daemonset failed")
 		return ctrl.Result{}, err
@@ -245,7 +251,74 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(nodeToAllServices(r)),
 		).
+		Watches(
+			&corev1.Endpoints{},
+			handler.EnqueueRequestsFromMapFunc(endpointToService),
+		).
 		Complete(r)
+}
+
+func (r *ServiceReconciler) serviceEndpoints(ctx context.Context, svc *corev1.Service) (ServiceEndpoints, error) {
+	if svc.Annotations[AnnotationExternalTrafficPolicy] != "Local" {
+		return nil, nil
+	}
+
+	var eps corev1.Endpoints
+	key := types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
+	if err := r.Get(ctx, key, &eps); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get endpoints %s: %w", key.String(), err)
+	}
+	return endpointsByServicePort(&eps, svc), nil
+}
+
+func endpointsByServicePort(eps *corev1.Endpoints, svc *corev1.Service) ServiceEndpoints {
+	if eps == nil || svc == nil {
+		return nil
+	}
+
+	servicePorts := make(map[string]corev1.Protocol, len(svc.Spec.Ports))
+	for _, p := range svc.Spec.Ports {
+		protocol := p.Protocol
+		if protocol == "" {
+			protocol = corev1.ProtocolTCP
+		}
+		servicePorts[p.Name] = protocol
+	}
+
+	out := make(ServiceEndpoints)
+	seen := make(map[string]map[string]struct{})
+	for _, subset := range eps.Subsets {
+		for _, port := range subset.Ports {
+			protocol, ok := servicePorts[port.Name]
+			if !ok {
+				continue
+			}
+			if port.Protocol != "" && port.Protocol != protocol {
+				continue
+			}
+			if seen[port.Name] == nil {
+				seen[port.Name] = make(map[string]struct{})
+			}
+			for _, addr := range subset.Addresses {
+				if addr.IP == "" {
+					continue
+				}
+				upstream := net.JoinHostPort(addr.IP, fmt.Sprintf("%d", port.Port))
+				if _, ok := seen[port.Name][upstream]; ok {
+					continue
+				}
+				seen[port.Name][upstream] = struct{}{}
+				out[port.Name] = append(out[port.Name], upstream)
+			}
+		}
+	}
+	for name := range out {
+		sort.Strings(out[name])
+	}
+	return out
 }
 
 func servicePredicate() predicate.Predicate {
@@ -287,4 +360,16 @@ func nodeToAllServices(r client.Reader) func(context.Context, client.Object) []c
 		}
 		return reqs
 	}
+}
+
+func endpointToService(_ context.Context, obj client.Object) []ctrl.Request {
+	if obj == nil {
+		return nil
+	}
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{
+			Namespace: obj.GetNamespace(),
+			Name:      obj.GetName(),
+		},
+	}}
 }

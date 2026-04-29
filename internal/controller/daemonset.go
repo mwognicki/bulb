@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -14,9 +16,10 @@ import (
 
 // Annotation keys; mirror the table in CLAUDE.md.
 const (
-	AnnotationNodes               = "bulb.toturi.tech/nodes"
-	AnnotationAllowPrivilegedPort = "bulb.toturi.tech/allow-privileged-port"
-	AnnotationProxyProtocol      = "bulb.toturi.tech/proxy-protocol"
+	AnnotationNodes                 = "bulb.toturi.tech/nodes"
+	AnnotationAllowPrivilegedPort   = "bulb.toturi.tech/allow-privileged-port"
+	AnnotationProxyProtocol         = "bulb.toturi.tech/proxy-protocol"
+	AnnotationExternalTrafficPolicy = "bulb.toturi.tech/external-traffic-policy"
 
 	labelManagedBy   = "app.kubernetes.io/managed-by"
 	labelManagedByV  = "bulb"
@@ -25,6 +28,10 @@ const (
 	containerName    = "proxy"
 	defaultDrainTime = "30s"
 )
+
+// ServiceEndpoints maps Service port names to ready endpoint upstreams
+// ("ip:port" or "[ipv6]:port"). The empty key is used for unnamed ports.
+type ServiceEndpoints map[string][]string
 
 // ErrPrivilegedPortDenied is returned when a Service requests a port < 1024
 // without the bulb.toturi.tech/allow-privileged-port="true" opt-in annotation.
@@ -43,7 +50,7 @@ var ErrPrivilegedPortDenied = errors.New("port < 1024 requires bulb.toturi.tech/
 // performs explicit cleanup on Service delete or type change. Revisit
 // only if bulb ever moves to one DS per namespace alongside the
 // Service, in which case OwnerReferences become viable.
-func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.DaemonSet, error) {
+func BuildDaemonSet(svc *corev1.Service, image, namespace string, endpointSets ...ServiceEndpoints) (*appsv1.DaemonSet, error) {
 	if svc == nil {
 		return nil, errors.New("service is nil")
 	}
@@ -62,7 +69,11 @@ func BuildDaemonSet(svc *corev1.Service, image, namespace string) (*appsv1.Daemo
 	}
 
 	proxyProtocol := svc.Annotations[AnnotationProxyProtocol]
-	ports, args, err := portsAndArgs(svc, proxyProtocol)
+	endpoints := ServiceEndpoints(nil)
+	if svc.Annotations[AnnotationExternalTrafficPolicy] == "Local" && len(endpointSets) > 0 {
+		endpoints = endpointSets[0]
+	}
+	ports, args, err := portsAndArgs(svc, proxyProtocol, endpoints)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +131,7 @@ func DaemonSetName(svc *corev1.Service) string {
 	return fmt.Sprintf("bulb-%s-%s", svc.Namespace, svc.Name)
 }
 
-func portsAndArgs(svc *corev1.Service, proxyProtocol string) ([]corev1.ContainerPort, []string, error) {
+func portsAndArgs(svc *corev1.Service, proxyProtocol string, endpoints ServiceEndpoints) ([]corev1.ContainerPort, []string, error) {
 	v4ClusterIP, v6ClusterIP := splitClusterIPs(svc)
 
 	ports := make([]corev1.ContainerPort, 0, len(svc.Spec.Ports))
@@ -145,16 +156,50 @@ func portsAndArgs(svc *corev1.Service, proxyProtocol string) ([]corev1.Container
 		})
 		flag := upstreamFlag(protocol)
 		if v4ClusterIP != "" {
-			args = append(args, fmt.Sprintf("--%s=0.0.0.0:%d=%s:%s", flag, p.Port, v4ClusterIP, target))
+			listen := fmt.Sprintf("0.0.0.0:%d", p.Port)
+			args = append(args, fmt.Sprintf("--%s=%s=%s:%s", flag, listen, v4ClusterIP, target))
+			args = appendEndpointArg(args, listen, endpointUpstreamsForFamily(endpoints[endpointKey(p)], false))
 		}
 		if v6ClusterIP != "" {
-			args = append(args, fmt.Sprintf("--%s=[::]:%d=[%s]:%s", flag, p.Port, v6ClusterIP, target))
+			listen := fmt.Sprintf("[::]:%d", p.Port)
+			args = append(args, fmt.Sprintf("--%s=%s=[%s]:%s", flag, listen, v6ClusterIP, target))
+			args = appendEndpointArg(args, listen, endpointUpstreamsForFamily(endpoints[endpointKey(p)], true))
 		}
 	}
 	if proxyProtocol != "" {
 		args = append(args, "--proxy-protocol="+proxyProtocol)
 	}
 	return ports, args, nil
+}
+
+func appendEndpointArg(args []string, listen string, endpoints []string) []string {
+	if len(endpoints) == 0 {
+		return args
+	}
+	return append(args, fmt.Sprintf("--endpoint=%s=%s", listen, strings.Join(endpoints, ",")))
+}
+
+func endpointKey(p corev1.ServicePort) string {
+	return p.Name
+}
+
+func endpointUpstreamsForFamily(endpoints []string, ipv6 bool) []string {
+	out := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		host, _, err := net.SplitHostPort(endpoint)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(strings.Trim(host, "[]"))
+		if ip == nil {
+			continue
+		}
+		if (ip.To4() == nil) == ipv6 {
+			out = append(out, endpoint)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // upstreamFlag picks the proxy CLI flag for a given Service port

@@ -21,7 +21,7 @@ import (
 // port and the goroutine.
 type udpForwarder struct {
 	listen      net.PacketConn
-	upstream    string
+	spec        Spec
 	idleTimeout time.Duration
 	logger      *slog.Logger
 
@@ -36,10 +36,10 @@ type udpSession struct {
 	closeOnce    sync.Once
 }
 
-func newUDPForwarder(listen net.PacketConn, upstream string, idle time.Duration, logger *slog.Logger) *udpForwarder {
+func newUDPForwarder(listen net.PacketConn, spec Spec, idle time.Duration, logger *slog.Logger) *udpForwarder {
 	return &udpForwarder{
 		listen:      listen,
-		upstream:    upstream,
+		spec:        spec,
 		idleTimeout: idle,
 		logger:      logger,
 		sessions:    make(map[string]*udpSession),
@@ -69,13 +69,13 @@ func (f *udpForwarder) run(ctx context.Context) {
 
 		sess, err := f.getOrCreate(clientAddr)
 		if err != nil {
-			f.logger.Error("udp upstream dial failed", "upstream", f.upstream, "client", clientAddr.String(), "err", err.Error())
+			f.logger.Error("udp upstream dial failed", "upstream", f.spec.Upstream, "client", clientAddr.String(), "err", err.Error())
 			continue
 		}
 		sess.lastActivity.Store(time.Now().UnixNano())
 
 		if _, werr := sess.upstream.Write(buf[:n]); werr != nil {
-			f.logger.Error("udp upstream write failed", "upstream", f.upstream, "err", werr.Error())
+			f.logger.Error("udp upstream write failed", "upstream", f.spec.Upstream, "err", werr.Error())
 			f.dropSession(clientAddr.String())
 		}
 	}
@@ -91,7 +91,8 @@ func (f *udpForwarder) getOrCreate(clientAddr net.Addr) (*udpSession, error) {
 	}
 	f.mu.Unlock()
 
-	upstreamAddr, err := net.ResolveUDPAddr("udp", f.upstream)
+	upstream := upstreamFor(f.spec)
+	upstreamAddr, err := net.ResolveUDPAddr("udp", upstream)
 	if err != nil {
 		return nil, err
 	}
