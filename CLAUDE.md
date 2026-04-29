@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project status
 
 Pre-alpha Go project. Phases 1–4 are complete. The latest tagged
-baseline is `v0.0.6`, which includes node annotation based public IP
+baseline is `v0.0.7`, which includes node annotation based public IP
 discovery, IPv6, UDP forwarding, PROXY protocol,
 `externalTrafficPolicy: Local` endpoint routing, Service conflict
 detection, proxy health probes, controller/proxy Prometheus metrics,

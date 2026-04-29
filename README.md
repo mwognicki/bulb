@@ -4,7 +4,7 @@ A small Kubernetes `type=LoadBalancer` controller for clusters that don't have a
 
 If you run kubeadm on a handful of VPS nodes — each with its own pinned public IP, no floating IPs, no shared L2, no BGP — then `kubectl apply` of a `type=LoadBalancer` Service just sits in `<pending>` forever. bulb is a Klipper-style fix for that case: it puts a tiny L4 proxy on every node's hostPort, opens the matching port in the host firewall, and computes dry-run DNS record targets for operators to publish manually.
 
-> **Status: pre-alpha.** The current tagged baseline is `v0.0.6`.
+> **Status: pre-alpha.** The current tagged baseline is `v0.0.7`.
 > Phases 1–4 are complete. The project ships a controller, proxy,
 > firewall-agent, DNSRecord dry-run, node-ip-labeler, and a Helm chart.
 > It is installable today. Phase 5 (DNS provider publishing) is optional
@@ -98,7 +98,7 @@ spec:
 
 ```sh
 helm install bulb oci://ghcr.io/mwognicki/charts/bulb \
-  --version 0.0.6 \
+  --version 0.0.7 \
   --namespace bulb-system \
   --create-namespace \
   --set firewall.backend=firewalld   # or iptables / nftables
