@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bulb-firewall-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: firewall-agent
+data:
+  backend: {{ .Values.firewall.backend }}
+  zone: {{ .Values.firewall.zone }}
+  stateFile: {{ .Values.firewall.stateFile }}
+  deniedPorts: {{ .Values.firewall.deniedPorts | quote }}
+  dryRun: {{ .Values.firewall.dryRun | quote }}

@@ -1,0 +1,68 @@
+# Namespace in which all bulb workloads run.
+namespace: bulb-system
+
+# Set to false to skip rendering the Namespace manifest (e.g. when the
+# namespace is managed by GitOps or another chart).
+namespaceCreate: true
+
+image:
+  repository: ghcr.io/mwognicki/bulb
+  # Defaults to .Chart.AppVersion when empty. Set explicitly to pin a
+  # specific tag independently of the chart version.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+firewall:
+  # Which host firewall backend the firewall-agent uses.
+  # Valid values: firewalld | iptables | nftables
+  # Only the selected backend's volume mounts are rendered.
+  backend: firewalld
+
+  # Zone to manage rules in (firewalld only; ignored by other backends).
+  zone: public
+
+  # Path on the host node where the agent persists its state file.
+  stateFile: /var/lib/bulb/firewall-agent-state.json
+
+  # Comma-separated list of ports the agent must never open regardless of
+  # what LBPort objects request. 22 prevents lockout; 80/443 are
+  # operator-managed and already open for ingress-nginx / cert-manager.
+  deniedPorts: "22,80,443"
+
+  # When "true" the agent validates and logs the desired port set but
+  # does not mutate the host firewall. Useful for auditing.
+  dryRun: "false"
+
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # Extra environment variables injected into the controller container.
+  extraEnv: []
+
+firewallAgent:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  # Extra environment variables injected into the firewall-agent container.
+  extraEnv: []
+
+nodeIpLabeler:
+  # How often the labeler re-reads the default-route interface and
+  # patches Node annotations.
+  interval: 60s
+  resources:
+    requests:
+      cpu: 5m
+      memory: 16Mi
+    limits:
+      memory: 32Mi
+  # Extra environment variables injected into the node-ip-labeler container.
+  extraEnv: []

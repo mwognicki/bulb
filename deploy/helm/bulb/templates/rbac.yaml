@@ -1,0 +1,201 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bulb-controller
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+---
+# Cluster-wide read on Services/Nodes; cluster-wide write on DaemonSets
+# is required because reconciler manages DSes in bulb-system regardless
+# of the watched Service's namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bulb-controller
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bulb.toturi.tech"]
+    resources: ["lbports"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["bulb.toturi.tech"]
+    resources: ["lbports/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["bulb.toturi.tech"]
+    resources: ["dnsrecords"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bulb-controller
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bulb-controller
+subjects:
+  - kind: ServiceAccount
+    name: bulb-controller
+    namespace: {{ .Values.namespace }}
+---
+# Namespace-scoped Lease control for leader election.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bulb-controller
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bulb-controller
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bulb-controller
+subjects:
+  - kind: ServiceAccount
+    name: bulb-controller
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bulb-firewall-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: firewall-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bulb-firewall-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: firewall-agent
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bulb-firewall-agent
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: firewall-agent
+rules:
+  - apiGroups: ["bulb.toturi.tech"]
+    resources: ["lbports"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bulb.toturi.tech"]
+    resources: ["lbports/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bulb-firewall-agent
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: firewall-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bulb-firewall-agent
+subjects:
+  - kind: ServiceAccount
+    name: bulb-firewall-agent
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bulb-firewall-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: firewall-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bulb-firewall-agent
+subjects:
+  - kind: ServiceAccount
+    name: bulb-firewall-agent
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bulb-node-ip-labeler
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-ip-labeler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bulb-node-ip-labeler
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-ip-labeler
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bulb-node-ip-labeler
+  labels:
+    {{- include "bulb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-ip-labeler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bulb-node-ip-labeler
+subjects:
+  - kind: ServiceAccount
+    name: bulb-node-ip-labeler
+    namespace: {{ .Values.namespace }}

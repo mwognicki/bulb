@@ -2,20 +2,18 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: bulb-node-ip-labeler
-  namespace: bulb-system
+  namespace: {{ .Values.namespace }}
   labels:
-    app.kubernetes.io/name: bulb
+    {{- include "bulb.labels" . | nindent 4 }}
     app.kubernetes.io/component: node-ip-labeler
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: bulb
-      app.kubernetes.io/component: node-ip-labeler
+      {{- include "bulb.selectorLabels" (dict "component" "node-ip-labeler" "root" .) | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: bulb
-        app.kubernetes.io/component: node-ip-labeler
+        {{- include "bulb.selectorLabels" (dict "component" "node-ip-labeler" "root" .) | nindent 8 }}
     spec:
       hostNetwork: true
       serviceAccountName: bulb-node-ip-labeler
@@ -25,24 +23,23 @@ spec:
           type: RuntimeDefault
       containers:
         - name: labeler
-          image: ghcr.io/mwognicki/bulb:v0.0.7
-          imagePullPolicy: IfNotPresent
+          image: {{ include "bulb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   apiVersion: v1
                   fieldPath: spec.nodeName
+            {{- with .Values.nodeIpLabeler.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           args:
             - node-ip-labeler
             - --node-name=$(NODE_NAME)
-            - --interval=60s
+            - --interval={{ .Values.nodeIpLabeler.interval }}
           resources:
-            requests:
-              cpu: 5m
-              memory: 16Mi
-            limits:
-              memory: 32Mi
+            {{- toYaml .Values.nodeIpLabeler.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

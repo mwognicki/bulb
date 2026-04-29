@@ -1,0 +1,16 @@
+apiVersion: v2
+name: bulb
+description: Kubernetes LoadBalancer controller for kubeadm/VPS clusters with pinned per-node public IPs
+type: application
+# Overridden by the release workflow: helm package --version "$VERSION" --app-version "$VERSION"
+version: 0.0.0
+appVersion: "0.0.0"
+keywords:
+  - kubernetes
+  - loadbalancer
+  - kubeadm
+home: https://github.com/mwognicki/bulb
+sources:
+  - https://github.com/mwognicki/bulb
+maintainers:
+  - name: mwognicki

@@ -4,17 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Pre-alpha Go project. The repository has working controller, proxy,
-firewall-agent, DNSRecord dry-run, and node-ip-labeler code through most
-of Phase 4. The latest tagged baseline is `v0.0.5`, which includes
-node annotation based public IP discovery, IPv6, UDP forwarding, PROXY
-protocol, and `externalTrafficPolicy: Local` endpoint routing.
+Pre-alpha Go project. Phases 1–4 are complete. The latest tagged
+baseline is `v0.0.7`, which includes node annotation based public IP
+discovery, IPv6, UDP forwarding, PROXY protocol,
+`externalTrafficPolicy: Local` endpoint routing, Service conflict
+detection, proxy health probes, controller/proxy Prometheus metrics,
+keep-on-uninstall, and a Helm chart at `deploy/helm/bulb/`.
 
-Before adding Helm or optional DNS publishing, tighten the operational
-contract described below. Conflict handling, Service status
-conditions/events, proxy health checks, controller/proxy metrics, and
-release automation are now present; documentation must continue to match
-the code.
+Phase 5 (DNS provider publishing) is optional and deferred. The project
+is installable today via the Helm chart or the raw manifests in
+`deploy/manifests/`.
 
 ## What bulb is
 
@@ -66,7 +65,7 @@ internal/proxy/               # TCP/UDP L4 forwarder
 internal/firewall/            # per-node firewall-agent
 internal/labeler/             # node public IP labeler
 deploy/manifests/             # CRDs, RBAC, controller Deployment
-deploy/helm/bulb/             # Helm chart (later)
+deploy/helm/bulb/             # Helm chart
 docs/design.md                # living design doc
 ```
 
@@ -79,8 +78,9 @@ Don't build phase N+1 until N is in production.
 - **Phase 1 — Klipper-clone (MVP). Done.** Controller + per-Service proxy DaemonSets. TCP forwarding works and `loadBalancer.ingress` is now populated from Node annotations rather than the original static ConfigMap design.
 - **Phase 2 — Firewall agent. Mostly done.** `LBPort` CRD + `firewall-agent` DaemonSet. The current agent supports firewalld, iptables, and nftables backends, dry-run mode, policy filtering, status updates, status-writer tests, stale applied-node cleanup, firewall events, and firewall-agent metrics. Controller-side Service/LBPort conflict handling is present; remaining work is mostly broader health/metrics contract polish.
 - **Phase 3 — DNS dry-run. Done, provider publishing deferred.** Controller computes and surfaces the desired DNS configuration per Service using `DNSRecord` CRs — but **no dns-agent, no health checks, no provider integration yet**. Rationale: target clusters are small, static VPS nodes; IP churn is rare. The operator can use the output to configure DNS manually until automated publishing is justified.
-- **Phase 4 — Polish. Done.** UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, custom controller/proxy metrics, and multi-arch-capable Docker builds are present. Docs and manifests are aligned with current behavior. Helm packaging is next.
-  - Per-node IP discovery is done: `node-ip-labeler` DaemonSet discovers public IPs from the default-route interface and annotates Nodes with `bulb.toturi.tech/public-ipv4` and `bulb.toturi.tech/public-ipv6`. The controller reads node annotations. The static `node-ips` ConfigMap approach has been removed.
+- **Phase 4 — Polish. Done.** UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, proxy health probes, controller/proxy metrics, keep-on-uninstall, multi-arch Docker builds, and a Helm chart (`deploy/helm/bulb/`) are all present and shipped.
+  - Per-node IP discovery: `node-ip-labeler` DaemonSet discovers public IPs from the default-route interface and annotates Nodes with `bulb.toturi.tech/public-ipv4` and `bulb.toturi.tech/public-ipv6`. The controller reads node annotations.
+  - Helm chart: packaged and published to `oci://ghcr.io/mwognicki/charts/bulb` by the release workflow on tag push.
 - **Phase 5 — DNS publishing (optional, deferred).** Provider integrations and active DNS target health checks are intentionally out of the current contract-tightening scope.
 - **Phase 6 (far future, optional).** Replace userspace TCP splice with SO_REUSEPORT + eBPF sockmap or nftables DNAT + conntrack. More DNS providers. kubectl plugin.
 
@@ -99,10 +99,11 @@ Don't build phase N+1 until N is in production.
   - `bulb.toturi.tech/allow-privileged-port: "true"` (required to open ports < 1024)
 - On Service delete or type change, GC the DaemonSet, LBPort CRs, DNSRecord CRs.
 
-### Contract-tightening backlog before Helm
+### Backlog before Phase 5
 
-All contract-tightening items are done. The operator contract is stable
-and Helm chart development (`deploy/helm/bulb/`) can begin.
+Phases 1–4 are complete, including the Helm chart. No known outstanding
+items block Phase 5 (optional DNS provider publishing) from being
+started when it becomes a priority.
 
 ### Proxy dataplane
 - TCP: accept on `0.0.0.0:<hostPort>`, dial `<ClusterIP>:<targetPort>`, splice both directions, propagate close. Per-connection goroutine; no shared state.
