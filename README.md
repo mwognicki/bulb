@@ -5,9 +5,10 @@ A small Kubernetes `type=LoadBalancer` controller for clusters that don't have a
 If you run kubeadm on a handful of VPS nodes — each with its own pinned public IP, no floating IPs, no shared L2, no BGP — then `kubectl apply` of a `type=LoadBalancer` Service just sits in `<pending>` forever. bulb is a Klipper-style fix for that case: it puts a tiny L4 proxy on every node's hostPort, opens the matching port in the host firewall, and computes dry-run DNS record targets for operators to publish manually.
 
 > **Status: pre-alpha.** The current tagged baseline is `v0.0.5`.
-> The project now has controller, proxy, firewall-agent, DNSRecord dry-run,
-> and node-ip-labeler pieces through most of Phase 4. It is still not a
-> polished installable product: contract tightening and packaging remain.
+> Phases 1 and 3 are done, Phases 2 and 4 are mostly done, and Phase 5 has not
+> started. The project has controller, proxy, firewall-agent, DNSRecord dry-run,
+> and node-ip-labeler pieces, but it is still not a polished installable
+> product: contract tightening and packaging remain.
 
 ## How it works
 
@@ -42,19 +43,20 @@ The dataplane (the proxy pods) is independent of the control plane. If the contr
 
 - A real, working public endpoint for `Service.spec.type: LoadBalancer` on every node, within ~10 seconds of `kubectl apply`.
 - Coordinated host firewall rules, so a deleted Service also closes the port.
-- DNS dry-run output via `DNSRecord` CRs, so operators can see the desired A/AAAA records before provider publishing exists.
+- DNS dry-run output via `DNSRecord` CRs, so operators can inspect desired A/AAAA records while provider integrations remain intentionally deferred.
 - Plays nicely with cert-manager doing **HTTP-01 / TLS-ALPN-01** ACME challenges. Ports 80 and 443 stay yours; bulb won't touch them unless you explicitly hand them over.
 
 ## What it deliberately doesn't do
 
 - **No virtual-IP failover.** That's impossible without floating IPs / BGP / shared L2. Future automated failover is DNS-based; today DNS output is dry-run only.
+- **No DNS provider publishing yet.** `DNSRecord` objects are the contract boundary for now; provider integrations are intentionally deferred.
 - **No L7.** No TLS termination, host routing, or path rewriting. Use ingress-nginx for HTTP; bulb just makes its `:80` and `:443` reachable.
 - **No multi-cluster, multi-tenant, or general-purpose ambitions.** Small cluster, single operator, ≈ 2k LoC of Go.
 
 ## Requirements
 
 - Kubernetes **1.36** (kubeadm).
-- A RHEL-family host OS with **firewalld + nftables + systemd**.
+- Linux nodes with at least one supported host firewall backend available: **firewalld**, **iptables**, or **nftables**.
 - One static public IPv4 (and optionally IPv6) per node.
 - A CNI that gives you working ClusterIP semantics (Cilium is what's tested).
 - kube-proxy in iptables mode.
@@ -92,17 +94,21 @@ spec:
       protocol: TCP
 ```
 
-## Trying the Current Manifests
+## Current Manifests
 
-The repository currently includes the control-plane manifests and one example workload in [deploy/manifests/examples/echo-service.yaml](deploy/manifests/examples/echo-service.yaml).
+The repository currently includes raw manifests for the controller,
+proxy-supporting CRDs/RBAC, node-ip-labeler, firewall-agent, and one example
+workload in [deploy/manifests/examples/echo-service.yaml](deploy/manifests/examples/echo-service.yaml).
+These manifests represent the current post-Phase-4 development baseline; Helm
+packaging is still intentionally pending until the operator contract is tighter.
 
-Before you deploy:
+Before applying them:
 
 - Make sure the `ghcr.io/mwognicki/bulb:v0.0.5` image exists and is pullable from your cluster.
-- Decide which firewall backend you want first: `firewalld`, `iptables`, or `nftables`.
+- Pick the firewall backend that matches your nodes: `firewalld`, `iptables`, or `nftables`.
 - The old `node-ips` ConfigMap path is deprecated. Public IPs now come from Node annotations written by the `node-ip-labeler` DaemonSet.
 
-Apply the manifests in this order:
+Apply the core manifests in this order:
 
 ```sh
 kubectl apply -f deploy/manifests/00-namespace.yaml
@@ -117,16 +123,15 @@ kubectl -n bulb-system rollout status deploy/bulb-controller
 kubectl apply -f deploy/manifests/examples/echo-service.yaml
 ```
 
-What should happen next:
+Expected reconciled objects:
 
 - The controller creates a per-Service DaemonSet in `bulb-system`.
 - The controller also creates one cluster-scoped `LBPort` object per exposed Service port.
 - That DaemonSet schedules one proxy pod per eligible node.
 - The node-ip-labeler annotates Nodes with `bulb.toturi.tech/public-ipv4` and, when available, `bulb.toturi.tech/public-ipv6`.
 - The `echo` Service gets `status.loadBalancer.ingress` values from those Node annotations.
-- Traffic sent to any mapped node public IP on port `8080` is forwarded to the example app on port `80`.
 
-Useful checks:
+Useful inspection commands:
 
 ```sh
 kubectl -n bulb-system get pods
@@ -134,7 +139,6 @@ kubectl -n bulb-system get ds
 kubectl -n bulb-system logs deploy/bulb-controller
 kubectl get lbport
 kubectl -n echo get svc echo -o yaml
-curl http://<node-public-ip>:8080
 ```
 
 The firewall-agent desired-state logic is backend-agnostic, and the implemented mutating backends today are:
@@ -231,13 +235,15 @@ the project should tighten the operator contract that Helm would package:
 
 ## Roadmap
 
-bulb is shipped in phases. Each phase is a real, deployable subset; the next phase doesn't start until the previous one is in production.
+bulb has been built as incremental deployable slices. Current completeness:
 
-1. **Klipper-clone (MVP)** — done.
-2. **Firewall agent** — mostly done; contract/conflict polish remains.
-3. **DNS dry-run** — done via `DNSRecord` CRs; provider publishing is deferred.
-4. **Polish** — mostly done: UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, and multi-arch-capable Docker builds are present.
-5. **Packaging and contract hardening** — next practical focus: status conditions, metrics, health checks, release automation, and Helm.
+| Phase | Status | Notes |
+|---|---|---|
+| 1. Klipper-clone MVP | Done | Controller creates per-Service proxy DaemonSets; TCP forwarding works; LoadBalancer ingress is populated from Node annotations rather than the original static ConfigMap design. |
+| 2. Firewall agent | Mostly done | `LBPort` CRD and firewall-agent exist with firewalld, iptables, nftables, dry-run mode, validation, status, events, cleanup, and metrics. Remaining work is contract polish around conflicts and Service conditions. |
+| 3. DNS dry-run | Done | Controller emits `DNSRecord` CRs that describe desired records. Provider publishing is intentionally deferred. |
+| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, and multi-arch-capable Docker builds are present. Remaining polish is health, metrics, conflict semantics, and release automation. |
+| 5. Packaging and contract hardening | Not started | Next practical focus: status conditions, metrics, proxy health checks, release automation, then Helm. |
 
 ## Building
 
