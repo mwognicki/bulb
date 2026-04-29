@@ -4,11 +4,11 @@ A small Kubernetes `type=LoadBalancer` controller for clusters that don't have a
 
 If you run kubeadm on a handful of VPS nodes — each with its own pinned public IP, no floating IPs, no shared L2, no BGP — then `kubectl apply` of a `type=LoadBalancer` Service just sits in `<pending>` forever. bulb is a Klipper-style fix for that case: it puts a tiny L4 proxy on every node's hostPort, opens the matching port in the host firewall, and computes dry-run DNS record targets for operators to publish manually.
 
-> **Status: pre-alpha.** The current tagged baseline is `v0.0.5`.
-> Phases 1–4 are done or mostly done. The project has controller, proxy,
-> firewall-agent, DNSRecord dry-run, and node-ip-labeler pieces with a
-> tightened operator contract. Helm packaging is the remaining step before
-> a first usable release.
+> **Status: pre-alpha.** The current tagged baseline is `v0.0.6`.
+> Phases 1–4 are complete. The project ships a controller, proxy,
+> firewall-agent, DNSRecord dry-run, node-ip-labeler, and a Helm chart.
+> It is installable today. Phase 5 (DNS provider publishing) is optional
+> and deferred.
 
 ## How it works
 
@@ -94,13 +94,36 @@ spec:
       protocol: TCP
 ```
 
-## Current Manifests
+## Installing with Helm
 
-The repository currently includes raw manifests for the controller,
-proxy-supporting CRDs/RBAC, node-ip-labeler, firewall-agent, and one example
-workload in [deploy/manifests/examples/echo-service.yaml](deploy/manifests/examples/echo-service.yaml).
-These manifests represent the current post-Phase-4 development baseline; Helm
-packaging is still intentionally pending until the operator contract is tighter.
+```sh
+helm install bulb oci://ghcr.io/mwognicki/charts/bulb \
+  --version 0.0.6 \
+  --namespace bulb-system \
+  --create-namespace \
+  --set firewall.backend=firewalld   # or iptables / nftables
+```
+
+Key values:
+
+| Value | Default | Purpose |
+|---|---|---|
+| `firewall.backend` | `firewalld` | Host firewall backend: `firewalld`, `iptables`, or `nftables` |
+| `firewall.deniedPorts` | `"22,80,443"` | Ports the agent must never open |
+| `firewall.dryRun` | `"false"` | Set `"true"` to audit without mutating the firewall |
+| `image.tag` | *(chart appVersion)* | Pin a specific image tag |
+| `namespace` | `bulb-system` | Namespace for all bulb workloads |
+| `namespaceCreate` | `true` | Set `false` if the namespace is managed externally |
+| `nodeIpLabeler.interval` | `60s` | How often the labeler re-reads the default-route interface |
+
+See `deploy/helm/bulb/values.yaml` for the full set of knobs.
+
+## Raw Manifests
+
+The raw manifests in `deploy/manifests/` remain available if you prefer
+applying them directly (e.g. for GitOps tooling that manages CRDs
+separately). They include one example workload at
+[deploy/manifests/examples/echo-service.yaml](deploy/manifests/examples/echo-service.yaml).
 
 Before applying them:
 
@@ -220,10 +243,12 @@ Practical validation expectations by backend:
 - `iptables`: both `iptables` and `ip6tables` must be present and their `INPUT` chains must be inspectable
 - `nftables`: the `nft` binary must be present and `nft list tables` must succeed
 
-## Next: Helm Packaging
+## What's next
 
-The operator contract is tightened. The next step is adding `deploy/helm/bulb/`
-to package the current manifest set as a Helm chart.
+Phase 5 — DNS provider publishing — is intentionally deferred. The `DNSRecord`
+CRs the controller emits today are the contract boundary: an operator can
+inspect them and configure DNS manually. Automated provider integration
+(`dns-agent`) will be Phase 5 when it becomes a priority.
 
 ## Release Automation
 
@@ -243,10 +268,10 @@ bulb has been built as incremental deployable slices. Current completeness:
 | Phase | Status | Notes |
 |---|---|---|
 | 1. Klipper-clone MVP | Done | Controller creates per-Service proxy DaemonSets; TCP forwarding works; LoadBalancer ingress is populated from Node annotations rather than the original static ConfigMap design. |
-| 2. Firewall agent | Mostly done | `LBPort` CRD and firewall-agent exist with firewalld, iptables, nftables, dry-run mode, validation, status, events, cleanup, and metrics. Controller-side Service/LBPort conflict detection now surfaces `PortConflict=True`; remaining work is mostly broader health/metrics contract polish. |
+| 2. Firewall agent | Done | `LBPort` CRD and firewall-agent with firewalld, iptables, and nftables backends; dry-run mode, validation, status, events, cleanup, metrics, and controller-side conflict detection (`PortConflict=True` condition). |
 | 3. DNS dry-run | Done | Controller emits `DNSRecord` CRs that describe desired records. Provider publishing is intentionally deferred. |
-| 4. Polish | Mostly done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, proxy health probes, `keep-on-uninstall`, custom controller/proxy metrics, and multi-arch-capable Docker builds are present. Local endpoint routing intentionally uses core `Endpoints`, not EndpointSlices. |
-| 5. Helm packaging | Next | Operator contract is tightened; Helm chart authoring is the next step. |
+| 4. Polish + packaging | Done | UDP, PROXY protocol, IPv6, `externalTrafficPolicy: Local`, automatic per-node IP discovery, Service conditions/events, proxy health probes, `keep-on-uninstall`, controller/proxy metrics, multi-arch Docker builds, and Helm chart (`deploy/helm/bulb/`). |
+| 5. DNS publishing | Optional / Deferred | `dns-agent` + provider integrations. `DNSRecord` CRs are already emitted for manual use; automated publishing is Phase 5 when it becomes a priority. |
 
 ## Building
 
